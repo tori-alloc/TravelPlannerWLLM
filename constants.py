@@ -1,7 +1,7 @@
 PLACE_WORD = [
     "곳", "장소", "지역", "어디"
 ]
-PLACE_RECOMMEND_PREER= [
+PLACE_RECOMMEND_PREFER= [
     "놀러갈" "갈만한" "괜찮은" "가기괜찮은" "가기 괜찮은"
 ]
 SEASON_RECOMMEND_PREFER= [
