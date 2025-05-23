@@ -2,35 +2,39 @@ import os
 from dotenv import load_dotenv
 
 import re
-from langgraph.graph import StateGraph, END
+
+from langchain.agents import tool, create_tool_calling_agent
+from langchain.output_parsers import PydanticOutputParser
+from langchain.prompts import ChatPromptTemplate, PromptTemplate
+from langchain.schema import AIMessage, HumanMessage, SystemMessage
+# from langchain_core import Runnable
 from langchain_groq import ChatGroq
 from langchain_cohere import ChatCohere
-from langchain.output_parsers import PydanticOutputParser
-from langchain.prompts import PromptTemplate
-from langchain.schema import AIMessage, HumanMessage, SystemMessage
+from langgraph.graph import StateGraph, END
 from typing import Optional, List
 
 from constants import PLACE_RECOMMEND_PREFER, SEASON_RECOMMEND_PREFER, PLACE_WORD, NEGATIVE_WORD
-from tool_service import search_place
+# from tool_service import search_place
+from tools.kakao_tool import search_kakao_places
+from tools.web_search_tool import web_search
 from state import PlannerState, InputAnalysis
 
 load_dotenv()
 GROQ_API_KEY= os.environ.get("GROQ_API_KEY")
 COHERE_API_KEY= os.environ.get("COHERE_API_KEY")
 
-# llm= ChatGroq(
-#     groq_api_key= GROQ_API_KEY,
-#     temperature= 0.7,
-#     model_name="meta-llama/llama-4-scout-17b-16e-instruct",
-#     streaming= True
-# )
-llm= ChatCohere(
-    groq_api_key= COHERE_API_KEY,
-    temperature= 0.7,
-    # model_name="meta-llama/llama-4-scout-17b-16e-instruct",
-    model_name="embed-multilingual-v3.0",
-    streaming= True
+TOOL_GUARDRAIL_MESSAGE= SystemMessage(content="""
+너는 여행 계획을 도와주는 전문가야. 사용자의 요청을 분석해서 필요한 경우 툴을 사용해서 답변해.
+지도 검색이 필요한 경우 search_kakao_places를, 웹 정보가 필요한 경우 web_search를 활용해.
+사용자 요청에 정확하고 현실적인 정보를 제공하는 것이 가장 중요해
+"""
 )
+tool_prompt= ChatPromptTemplate.from_messages([
+    TOOL_GUARDRAIL_MESSAGE,
+    # MessagePlaceholder(variable_name= "agent_scratchpad")
+    ("placeholder", "{agent_scratchpad}")
+    # MessagePlaceholder('messages')
+])
 
 GUARDRAIL_MESSAGE = SystemMessage(content="""
 You are a professional agent that helps plan travel itineraries. Always follow the guidelines below:
@@ -45,6 +49,33 @@ You are a professional agent that helps plan travel itineraries. Always follow t
 
 Never deviate from this guide and always act according to these standards.
 """)
+
+tools= [ search_kakao_places, web_search ]
+# llm= ChatGroq(
+#     groq_api_key= GROQ_API_KEY,
+#     temperature= 0.7,
+#     model_name="meta-llama/llama-4-scout-17b-16e-instruct",
+#     streaming= True
+# )
+llm= ChatCohere(
+    groq_api_key= COHERE_API_KEY,
+    temperature= 0.7,
+    # model_name="meta-llama/llama-4-scout-17b-16e-instruct",
+    model_name="embed-multilingual-v3.0",
+    streaming= True
+)
+# tool_llm= ChatCohere(
+#     groq_api_key= COHERE_API_KEY,
+#     temperature= 0.7,
+#     # model_name="meta-llama/llama-4-scout-17b-16e-instruct",
+#     model_name="embed-multilingual-v3.0",
+#     streaming= True
+# )
+tool_calling_llm= create_tool_calling_agent(
+    # llm= llm,
+    # tools= tools
+    llm, tools, tool_prompt
+)
 
 def has_string(s: str, ws: List[str]) -> bool:
     return any(w in s for w in ws)
@@ -63,6 +94,29 @@ def get_streaming_response(state: PlannerState, prompt: str, system: Optional[Sy
         nonlocal response_accumulator
         current_text= ""
         for chunk in llm.stream(messages):
+            if hasattr(chunk, "content"):
+                content= chunk.content or ""
+                current_text += content
+                yield content
+        response_accumulator= current_text
+        if response_accumulator:
+            state.chat_history.append(user_message)
+            state.chat_history.append(AIMessage(content= response_accumulator))
+    return stream_gen()
+def get_tools_streaming_response(state: PlannerState, prompt: str, system: Optional[SystemMessage]= None):
+    messages= []
+    messages.append(TOOL_GUARDRAIL_MESSAGE)
+    if system:
+        messages.append(system)
+    # messages.extend(state.chat_history)
+    user_message= HumanMessage(content= prompt)
+    messages.append(user_message)
+    
+    response_accumulator= ""
+    def stream_gen():
+        nonlocal response_accumulator
+        current_text= ""
+        for chunk in tool_calling_llm.stream(messages):
             if hasattr(chunk, "content"):
                 content= chunk.content or ""
                 current_text += content
@@ -224,6 +278,41 @@ def export_plan_to_pdf(state: PlannerState) -> PlannerState:
             print("generated pdf path", state.generated_pdf_path)
     return state
 
+def supervise_input(state: PlannerState) -> PlannerState:
+    missing_fields= []
+    if not state.travel_start_date:
+        missing_fields.append("여행 시작 일자")
+    if not state.travel_end_date:
+        missing_fields.append("여행 종료 일자")
+    if not state.travel_region:
+        missing_fields.append("여행 지역")
+    if not state.user_profile:
+        missing_fields.append("여행자 정보")
+    if not state.travel_vehicle:
+        missing_fields.append("이동 수단")
+    if missing_fields:
+        prompt= f"""
+        사용자 입력: {state.user_input}
+        아래 정보가 비어있습니다: {', '.join(missing_fields)}
+        이대로 여행 계획을 세워보시겠어요? 아니면 정보를 보완하시겠습니까?
+        """
+        state.stream_response= get_streaming_response(state, prompt)
+    return state
+def suggest_accommodations(state: PlannerState) -> PlannerState:
+    prompt= f"{state.travel_region} 근처 숙소를 추천해주세요. 일정의 모든 여행지를 10분 이내에 도달할 수 있는지 먼저 찾아보고, 검색되는 숙소가 없을 경우 검색하는 반경을 이동시간 5분씩 늘려가며 검색하세요. 평점 3점 미만인 숙소는 추천하지 마세요."
+    state.stream_response= get_tools_streaming_response(state, prompt)
+    return state
+def suggest_restaurants(state: PlannerState) -> PlannerState:
+    prompt= f"{state.travel_region} 근처의 맛집을 일정에 따라 찾아주세요. 각 일정으로부터 이동했을 경우를 고려하여 이동시간 최소 5분이 걸리는 거리 내의 음식점부터 검색하며, 검색되는 음식점이 없을 경우, 검색하는 반경을 이동시간 5분씩 늘려가며 검색하세요. 평점 4점 이상인 음식점만 추천해주세요"
+    state.stream_response= get_tools_streaming_response(state, prompt)
+    return state
+def suggest_transit(state: PlannerState) -> PlannerState:
+    if state.travel_vehicle in ["도보", "대중교통", "기차", "버스", "지하철", "전철", "트램", "걸어서", "차없이", "차 없이"]:
+        prompt= f"{state.travel_region}을 여행하는 일정에 따라 여행지, 다음 목적지, 혹은 숙소로 이동할 때 이용할 이동 교통편을 구체적으로 알려주세요. 도보일 경우 도보 몇 분인지, 버스를 타야할 경우 어떤 버스를 어떤 정류장에서 타서 어떤 정류장에서 내려야하는지, 여러 교통편을 섞어서 이용할 경우 어떻게 이동하다가 어떤 교통편으로 어떻게 갈아타는지 등 이동 교통편에 대한 정보를 상세히 알려주세요."
+        # state.stream_response= get_streaming_response(state, prompt)
+        state.stream_response= get_tools_streaming_response(state, prompt)
+    return state
+
 def is_positive_confirmation(state: PlannerState) -> bool:
     return (
         state.current_node == "positive" 
@@ -267,31 +356,83 @@ def wants_export_pdf(state: PlannerState) -> bool:
     export_pattern = r"(pdf|출력|다운로드|저장|인쇄).*(일정|계획)|.*(일정|계획).*(pdf|출력|다운로드|저장|인쇄)"
     return has_string(state.user_input.lower(), export_trigger_phrases) or bool(re.search(export_pattern, state.user_input, re.IGNORECASE))
 
+def has_minimum_required_info(state: PlannerState) -> bool:
+    return state.travel_region and state.travel_start_date and state.travel_end_date
+def wants_accommodation_suggestion(state: PlannerState) -> bool:
+    return has_string(
+        state.user_input, 
+        [ "숙소", "호텔", "게스트하우스", "레지던스"]
+    )
+def wants_restaurant_suggestion(state: PlannerState) -> bool:
+    return has_string(
+        state.user_input,
+        ["맛집", "음식점", "식당", "식사", "끼니"]
+    )
+def wants_transit_suggestion(state: PlannerState) -> bool:
+    return has_string(
+        state.user_input,
+        ["교통", "지하철", "버스", "수단", "어떻게 이동", "경로"]
+    )
+def check_kakao_login(state: PlannerState)->bool:
+    return has_string(state.user_input.lower(), ["카카오", "kakao", "로그인", "login", "계정 연결"])
+
+def kakao_login(state: PlannerState)->bool:
+    # if state.kakao_token:
+    #     state.stream_response= iter(["카카오 계정이 이미 연결되어 있습니다."])
+    # else:
+    #     state.stream_response= iter(["카카오 계정을 연결해주세요."])
+    # state.chat_history.append(
+    #     (
+    #         "kakao",
+    #         None
+    #     )
+    # )
+    state.is_login_kakao= True
+    return state
+
 def router(state: PlannerState) -> PlannerState:
+    if check_kakao_login(state):
+        return "KakaoLogin"
+    if not has_minimum_required_info(state):
+        return "SuperviseInput"
     if wants_export_pdf(state):
         return "ExportPDF"
     if is_place_request(state):
         return "RecommendPlaces"
-    if is_missing_info(state):
-        return "AskForMissingInfo"
+    if not has_minimum_required_info(state):
+        return "SuperviseInput"
+    if state.current_node == "itinerary_suggestion":
+        if wants_accommodation_suggestion(state):
+            return "SuggestAccommodations"
+        if wants_restaurant_suggestion(state):
+            return "SuggestRestaurants"
+        if wants_transit_suggestion(state):
+            return "SuggestTransit"
     if is_positive_confirmation(state):
         return "FinalizePlan"
     if is_schedule_request(state):
         return "GeneratePlan"
     if wants_calendar_registration(state):
         return "RegisterCalendar"
-    return "AskForMissingInfo"
+    return "SuperviseInput"
+
+# def kakao_login(state: PlannerState) -> PlannerState:
+#     return state
 
 def build_flexible_planner_graph():
     builder= StateGraph(PlannerState)
     
+    builder.add_node("SuperviseInput", supervise_input)
     builder.add_node("AnalyzeInput", analyze_input)
     builder.add_node("RecommendPlaces", recommend_places)
-    builder.add_node("AskForMissingInfo", ask_for_missing_info)
     builder.add_node("GeneratePlan", generate_plan)
+    builder.add_node("SuggestAccommodations", suggest_accommodations)
+    builder.add_node("SuggestRestaurants", suggest_restaurants)
+    builder.add_node("SuggestTransit", suggest_transit)
     builder.add_node("FinalizePlan", finalize_plan)
     builder.add_node("RegisterCalendar", register_calendar)
     builder.add_node("ExportPDF", export_plan_to_pdf)
+    builder.add_node("KakaoLogin", kakao_login)
     
     builder.set_entry_point("AnalyzeInput")
     
@@ -299,11 +440,16 @@ def build_flexible_planner_graph():
         "AnalyzeInput",
         router,
         {
+            "SuperviseInput": "SuperviseInput",
             "RecommendPlaces": "RecommendPlaces",
-            "AskForMissingInfo": "AskForMissingInfo",
+            # "AskForMissingInfo": "AskForMissingInfo",
+            "SuggestAccommodations": "SuggestAccommodations",
+            "SuggestRestaurants": "SuggestRestaurants",
+            "SuggestTransit": "SuggestTransit",
             "GeneratePlan": "GeneratePlan",
             "FinalizePlan": "FinalizePlan",
-            "ExportPDF": "ExportPDF"
+            "ExportPDF": "ExportPDF",
+            "KakaoLogin": "KakaoLogin"
         }
     )
     builder.add_conditional_edges(
@@ -313,10 +459,15 @@ def build_flexible_planner_graph():
         }
     )
     
+    builder.add_edge("SuperviseInput", END)
     builder.add_edge("RecommendPlaces", END)
     builder.add_edge("GeneratePlan", END)
-    builder.add_edge("AskForMissingInfo", END)
+    builder.add_edge("SuggestAccommodations", END)
+    builder.add_edge("SuggestRestaurants", END)
+    builder.add_edge("SuggestTransit", END)
+    # builder.add_edge("AskForMissingInfo", END)
     builder.add_edge("RegisterCalendar", END)
     builder.add_edge("ExportPDF", END)
+    builder.add_edge("KakaoLogin", END)
     
     return builder.compile()

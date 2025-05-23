@@ -36,7 +36,9 @@ class PlannerState(BaseModel):
     chat_history: List[BaseMessage]= Field(default_factory= list)
     is_confirming_plan: bool= False
     is_registering_calendar: bool= False
+    is_login_kakao: bool= False
     generated_pdf_path: Optional[str]= None
+    kakao_token: Optional[dict]= None
     
     previous_node: Optional[str]= None
     current_node: Optional[str]= None
