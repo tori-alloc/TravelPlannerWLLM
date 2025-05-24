@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 
 import re
@@ -39,31 +40,37 @@ tool_prompt= ChatPromptTemplate.from_messages([
 GUARDRAIL_MESSAGE = SystemMessage(content="""
 You are a professional agent that helps plan travel itineraries. Always follow the guidelines below:
 
-1. Always be kind, respectful, and maintain a user-friendly tone.
-2. Travel recommendations must be realistic, taking into account the season, regional characteristics, travel duration, budget, and means of transportation.
-3. Only recommend real, verifiable places and activities. Do not provide unconfirmed or fictional information.
-4. When a user asks a question, respond clearly and naturally guide them to the next step (e.g., confirm itinerary, suggest places, etc.).
-5. Keep your answers concise yet specific, and make sure all user requests are fully addressed.
-6. Do not provide information that is politically, religiously, or ethically sensitive.
-7. Always consider formatting your responses in JSON, markdown, or another structure-friendly format that is easy for the UI to process.
+- Always be kind, respectful, and maintain a user-friendly tone.
+- Travel recommendations must be realistic, taking into account the season, regional characteristics, travel duration, budget, and means of transportation.
+- Only recommend real, verifiable places and activities. Do not provide unconfirmed or fictional information.
+- When a user asks a question, respond clearly and naturally guide them to the next step (e.g., confirm itinerary, suggest places, etc.).
+- Keep your answers concise yet specific, and make sure all user requests are fully addressed.
+- Do not provide information that is politically, religiously, or ethically sensitive.
+- Always consider formatting your responses in JSON, markdown, or another structure-friendly format that is easy for the UI to process.
+
+Additional guideline:  
+When the user mentions a date, always interpret it as the next upcoming instance of that date in the future.  
+For example, if today is August 2nd and the user says "August 10th", interpret it as August 10th, 2025.  
+If the user says "April 10th", interpret it as April 10th, 2026 (since April 10th, 2025 has already passed).  
+All trips must be planned for the future — never use a past date. Always choose the closest upcoming date relative to today.
 
 Never deviate from this guide and always act according to these standards.
 """)
 
 tools= [ search_kakao_places, web_search ]
-# llm= ChatGroq(
-#     groq_api_key= GROQ_API_KEY,
-#     temperature= 0.7,
-#     model_name="meta-llama/llama-4-scout-17b-16e-instruct",
-#     streaming= True
-# )
-llm= ChatCohere(
-    groq_api_key= COHERE_API_KEY,
+llm= ChatGroq(
+    groq_api_key= GROQ_API_KEY,
     temperature= 0.7,
-    # model_name="meta-llama/llama-4-scout-17b-16e-instruct",
-    model_name="embed-multilingual-v3.0",
+    model_name="meta-llama/llama-4-scout-17b-16e-instruct",
     streaming= True
 )
+# llm= ChatCohere(
+#     groq_api_key= COHERE_API_KEY,
+#     temperature= 0.7,
+#     # model_name="meta-llama/llama-4-scout-17b-16e-instruct",
+#     model_name="embed-multilingual-v3.0",
+#     streaming= True
+# )
 # tool_llm= ChatCohere(
 #     groq_api_key= COHERE_API_KEY,
 #     temperature= 0.7,
@@ -138,10 +145,20 @@ def check_missing_info(state: PlannerState) -> Optional[str]:
     print("check missing info")
     return None
 
+def ensure_future_date(date_str: str) -> str:
+    today = datetime.today()
+    parsed = datetime.strptime(date_str, "%Y-%m-%d")
+    if parsed.date() < today.date():
+        return parsed.replace(year=today.year + 1).strftime("%Y-%m-%d")
+    return date_str
+
 def analyze_input(state: PlannerState) -> PlannerState:
     print("analyze input")
+    TODAY = datetime.now().strftime("%Y-%m-%d")
     prompt_template = PromptTemplate.from_template(
         """
+        Today is {date}.
+        
         Here is the conversation history so far:
         {history}
 
@@ -150,6 +167,10 @@ def analyze_input(state: PlannerState) -> PlannerState:
 
         Based on the above, extract the following information and return it as a JSON object.
         Your response must be JSON only. Do not include any explanation.
+        Date handling rule:
+        - If a user says "August 2nd" or similar, and that date has already passed this year, interpret it as the same date **next year**.
+        - If the date is later in this year, use this year.
+        - Always interpret dates **as the nearest future date**.
 
         Output format:
         {{
@@ -159,7 +180,7 @@ def analyze_input(state: PlannerState) -> PlannerState:
             "travel_start_date": "<YYYY-MM-DD format>",
             "travel_end_date": "<YYYY-MM-DD format>",
             "travel_duration": "<Trip duration (e.g., 1 night 2 days, 2 nights 3 days, 4 days)>",
-            "action_type": "<region_suggestion / place_suggestion / itinerary_suggestion / registration_request / modification_request / unclear / positive / negative>"
+            "action_type": "<region_suggestion / place_suggestion / itinerary_suggestion / restaurant_suggestion / accommodation_suggestion / transit_suggestion / registration_request / modification_request / unclear / positive / negative>"
         }}
         """
     )
@@ -175,18 +196,58 @@ def analyze_input(state: PlannerState) -> PlannerState:
     chain= prompt_template | llm | parser
     
     try:
-        result= chain.invoke({ "input": state.user_input, "history": history_text })
+        result= chain.invoke({ "date": TODAY, "input": state.user_input, "history": history_text })
         state.travel_region= result.travel_region or state.travel_region
         state.travel_places= result.travel_places or state.travel_places
         state.travel_season_or_month= result.travel_season_or_month or state.travel_season_or_month
-        state.travel_start_date= result.travel_start_date or state.travel_start_date
-        state.travel_end_date= result.travel_end_date or state.travel_end_date
+        state.travel_start_date= ensure_future_date(result.travel_start_date or state.travel_start_date)
+        # state.travel_end_date= result.travel_end_date or state.travel_end_date
+        # state.travel_duration= result.travel_duration or state.travel_duration
+        # state.travel_start_date= ensure_future_date(result.travel_start_date) if result.travel_start_date else state.travel_start_date
+        state.travel_end_date= ensure_future_date(result.travel_end_date or state.travel_end_date)
         state.travel_duration= result.travel_duration or state.travel_duration
         state.previous_node= state.current_node
         state.current_node= result.action_type
     except Exception as e:
         print(f"[ERROR] Failed to parse input: {e}")
     print("analyze input")
+    return state
+
+def supervise_input(state: PlannerState) -> PlannerState:
+    prompt= (
+        f"The user said: '{state.user_input}'. "
+        "Based on the information so far, please recommend travel destinations.\n"
+        "Limit your recommendations to 4 to 7 options, and provide a brief summary for each (location / suggested duration / highlight).\n"
+        "The final sentence must be: 'Which of these destinations interests you the most?'"
+    )
+    
+    missing_fields= []
+    if not state.travel_start_date:
+        missing_fields.append("여행 시작 일자")
+    if not state.travel_end_date:
+        missing_fields.append("여행 종료 일자")
+    if not state.travel_region:
+        missing_fields.append("여행 지역")
+    if not state.user_profile:
+        missing_fields.append("여행자 정보")
+    if not state.travel_vehicle:
+        missing_fields.append("이동 수단")
+    if missing_fields:
+        # prompt= f"""
+        # 사용자 입력: {state.user_input}
+        # 아래 정보가 비어있습니다: {', '.join(missing_fields)}
+        # 이대로 여행 계획을 세워보시겠어요? 아니면 정보를 보완하시겠습니까?
+        # """
+        prompt += f"\n\n[Additional Information Needed]\nTo make your travel plan more personalized, please provide the following details: {', '.join(missing_fields)}."
+    system = SystemMessage(
+        content=(
+            "You are a helpful travel planner.\n"
+            "You must provide realistic destination suggestions based on season and user input.\n"
+            "Always use markdown format.\n"
+            "If user information is missing, ask politely for it at the end."
+        )
+    )
+    state.stream_response= get_streaming_response(state, prompt, system)
     return state
 
 def recommend_places(state: PlannerState) -> PlannerState:
@@ -227,11 +288,22 @@ def ask_for_missing_info(state: PlannerState) -> PlannerState:
     return state
 
 def generate_plan(state: PlannerState) -> PlannerState:
-    plan_prompt= (
-        f"Please create a travel itinerary for a trip to {state.travel_region} from {state.travel_start_date} to {state.travel_end_date}, lasting {state.travel_duration}.\n\n"
-        "Structure the itinerary day by day, dividing each day into morning and afternoon, and specify exact times for each activity. Include places and activities.\n"
-        "The plan should be realistic — account for travel time on the first day and keep the last day light."
+    # plan_prompt= (
+    #     f"Please create a travel itinerary for a trip to {state.travel_region} from {state.travel_start_date} to {state.travel_end_date}, lasting {state.travel_duration}.\n\n"
+    #     "Structure the itinerary day by day, dividing each day into morning and afternoon, and specify exact times for each activity. Include places and activities.\n"
+    #     "The plan should be realistic — account for travel time on the first day and keep the last day light."
 
+    # )
+    plan_prompt = (
+        f"Please create a travel itinerary for a trip to {state.travel_region} "
+        f"from {state.travel_start_date} to {state.travel_end_date}, lasting {state.travel_duration}.\n\n"
+        "Structure the plan day by day, clearly labeling each date (e.g. '2025-08-02') "
+        "and divide each day into '아침' and '오후'.\n"
+        "Each section should list activities with time and description, like:\n"
+        "- 09:00: Activity description\n"
+        "- 13:30: Another activity\n\n"
+        "Format the entire response using **Markdown** with proper indentation.\n"
+        "Do not include any explanations or summaries outside the schedule."
     )
     system= SystemMessage(
         content= (
@@ -244,6 +316,14 @@ def generate_plan(state: PlannerState) -> PlannerState:
             "Respond in markdown format, and clearly separate each date."
         )
     )
+    # system = SystemMessage(
+    #     content=(
+    #         "You are a JSON-only travel itinerary generator.\n"
+    #         "You must output a valid JSON **only**, with no explanation, no markdown, no headers.\n\n"
+    #         "Your response should be a JSON array. Each element in the array should be an object with the date as the key (in YYYY-MM-DD format), and the value should be an object with '오전' and '오후' keys. Each of these keys should have a list of activities with 'time' and 'description'.\n\n"
+    #         "Never explain or describe what you're doing. Your response must be a plain, parsable JSON structure."
+    #     )
+    # )
     state.stream_response= get_streaming_response(state, plan_prompt, system)
     return state
 
@@ -278,26 +358,6 @@ def export_plan_to_pdf(state: PlannerState) -> PlannerState:
             print("generated pdf path", state.generated_pdf_path)
     return state
 
-def supervise_input(state: PlannerState) -> PlannerState:
-    missing_fields= []
-    if not state.travel_start_date:
-        missing_fields.append("여행 시작 일자")
-    if not state.travel_end_date:
-        missing_fields.append("여행 종료 일자")
-    if not state.travel_region:
-        missing_fields.append("여행 지역")
-    if not state.user_profile:
-        missing_fields.append("여행자 정보")
-    if not state.travel_vehicle:
-        missing_fields.append("이동 수단")
-    if missing_fields:
-        prompt= f"""
-        사용자 입력: {state.user_input}
-        아래 정보가 비어있습니다: {', '.join(missing_fields)}
-        이대로 여행 계획을 세워보시겠어요? 아니면 정보를 보완하시겠습니까?
-        """
-        state.stream_response= get_streaming_response(state, prompt)
-    return state
 def suggest_accommodations(state: PlannerState) -> PlannerState:
     prompt= f"{state.travel_region} 근처 숙소를 추천해주세요. 일정의 모든 여행지를 10분 이내에 도달할 수 있는지 먼저 찾아보고, 검색되는 숙소가 없을 경우 검색하는 반경을 이동시간 5분씩 늘려가며 검색하세요. 평점 3점 미만인 숙소는 추천하지 마세요."
     state.stream_response= get_tools_streaming_response(state, prompt)
@@ -338,7 +398,9 @@ def is_place_request(state: PlannerState) -> bool:
 def is_missing_info(state: PlannerState) -> bool:
     return check_missing_info(state) is not None
 def wants_calendar_registration(state: PlannerState) -> bool:
-    return state.is_registering_calendar is True
+    r= state.is_registering_calendar is True
+    print("일정 등록하기", r)
+    return r
 def wants_export_pdf(state: PlannerState) -> bool:
     export_trigger_phrases = [
         "일정 내보내기",
@@ -377,47 +439,36 @@ def check_kakao_login(state: PlannerState)->bool:
     return has_string(state.user_input.lower(), ["카카오", "kakao", "로그인", "login", "계정 연결"])
 
 def kakao_login(state: PlannerState)->bool:
-    # if state.kakao_token:
-    #     state.stream_response= iter(["카카오 계정이 이미 연결되어 있습니다."])
-    # else:
-    #     state.stream_response= iter(["카카오 계정을 연결해주세요."])
-    # state.chat_history.append(
-    #     (
-    #         "kakao",
-    #         None
-    #     )
-    # )
     state.is_login_kakao= True
     return state
 
 def router(state: PlannerState) -> PlannerState:
-    if check_kakao_login(state):
-        return "KakaoLogin"
     if not has_minimum_required_info(state):
         return "SuperviseInput"
     if wants_export_pdf(state):
         return "ExportPDF"
-    if is_place_request(state):
-        return "RecommendPlaces"
-    if not has_minimum_required_info(state):
-        return "SuperviseInput"
-    if state.current_node == "itinerary_suggestion":
+    if state.current_node in [
+        "accommodation_suggestion",
+        "restaurant_suggestion",
+        "transit_suggestion",
+        "itinerary_suggestion"
+    ]:
         if wants_accommodation_suggestion(state):
             return "SuggestAccommodations"
         if wants_restaurant_suggestion(state):
             return "SuggestRestaurants"
         if wants_transit_suggestion(state):
             return "SuggestTransit"
+    if wants_calendar_registration(state):
+        if not state.kakao_token:
+            return "KakaoLogin"
+        else:
+            return "RegisterCalendar"
     if is_positive_confirmation(state):
         return "FinalizePlan"
     if is_schedule_request(state):
         return "GeneratePlan"
-    if wants_calendar_registration(state):
-        return "RegisterCalendar"
     return "SuperviseInput"
-
-# def kakao_login(state: PlannerState) -> PlannerState:
-#     return state
 
 def build_flexible_planner_graph():
     builder= StateGraph(PlannerState)
@@ -442,7 +493,6 @@ def build_flexible_planner_graph():
         {
             "SuperviseInput": "SuperviseInput",
             "RecommendPlaces": "RecommendPlaces",
-            # "AskForMissingInfo": "AskForMissingInfo",
             "SuggestAccommodations": "SuggestAccommodations",
             "SuggestRestaurants": "SuggestRestaurants",
             "SuggestTransit": "SuggestTransit",
@@ -465,7 +515,6 @@ def build_flexible_planner_graph():
     builder.add_edge("SuggestAccommodations", END)
     builder.add_edge("SuggestRestaurants", END)
     builder.add_edge("SuggestTransit", END)
-    # builder.add_edge("AskForMissingInfo", END)
     builder.add_edge("RegisterCalendar", END)
     builder.add_edge("ExportPDF", END)
     builder.add_edge("KakaoLogin", END)

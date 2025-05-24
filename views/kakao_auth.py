@@ -19,7 +19,8 @@ def build_kakao_auth_url():
             {
                 "response_type": "code",
                 "client_id": KAKAO_API_KEY,
-                "redirect_uri": "http://localhost:8501"
+                "redirect_uri": "http://localhost:8501",
+                "scope": "profile_nickname,account_email,talk_calendar,talk_calendar_task"
             }
         )
     )
@@ -36,18 +37,10 @@ def get_kakao_token(auth_code: str):
 def get_kakao_profile(access_token: str):
     headers= { "Authorization": f"Bearer {access_token}" }
     res= requests.get("https://kapi.kakao.com/v2/user/me", headers= headers)
-    print()
-    print("res",res)
-    print()
-    print("res text", res.text)
-    print()
-    print("res content", res.content)
-    print()
-    print("res json", res.json())
-    print()
     return res.json()
 
 def run_kakao_login_view():
+    print("k 1")
     st.title= ("카카오 로그인 중 ...")
     
     if "code" in st.query_params:
@@ -61,6 +54,12 @@ def run_kakao_login_view():
                 server_state["kakao_info"]= profile
             st.success(f"{profile['properties']['nickname']}님, 카카오 로그인 되었습니다.")
             st.query_params.clear()
+            st.markdown(
+                """
+                <meta http-equiv="refresh" content="1; url=/" />
+                """,
+                unsafe_allow_html=True,
+            )
         else:
             st.error(f"카카오 로그인 실패: {token_info}")
     else:

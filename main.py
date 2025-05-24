@@ -11,8 +11,11 @@ is_exist_code= query_params.get("code", None)
 #     st.stop()
 # else:
 #     planner_app.run_chatbot_ui()
+print("a")
 if is_exist_code is not None:
+    print("b")
     kakao_auth.run_kakao_login_view()
     st.stop()
 else:
+    print("c")
     planner_app.run_chatbot_ui()
