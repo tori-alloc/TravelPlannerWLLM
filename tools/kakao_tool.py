@@ -4,11 +4,12 @@ import requests
 import os
 import json
 from datetime import datetime, timedelta
+import pytz
 import urllib.parse
-from typing import Dict, Any
+from typing import Dict, Any, List
 from dotenv import load_dotenv
 from state import DayPlan
-from error import CalendarServiceError
+from error import CalendarServiceError, SharingServiceError
 
 load_dotenv()
 KAKAO_API_KEY= os.environ.get("KAKAO_API_KEY")
@@ -64,41 +65,47 @@ def search_kakao_places(
         for doc in data["documents"]
     ]
 
-CALENDAR_BASE_URL= "https://kapi.kakao.com/v2/api/calendar"
+KAKAO_BASE_URL= "https://kapi.kakao.com/v2/api"
 def get_schedule_list(access_token: str, start_date: str, end_date: str) -> Dict[str, Any]:
-    url= f"{CALENDAR_BASE_URL}/events?time_zone=Asia/Seoul&from={start_date}T00:00:00Z&to={end_date}T23:59:59Z"
+    url= f"{KAKAO_BASE_URL}/calendar/events?time_zone=Asia/Seoul&from={start_date}T00:00:00Z&to={end_date}T23:59:59Z"
     headers= {
         "Authorization": f"Bearer {access_token}"
     }
     try:
         res= requests.get(url, headers= headers)
-        print("get schedule response", res.json())
         res.raise_for_status()
+        # print()
+        # print(res.json())
+        # print()
+        
         return res.json()
     except Exception as e:
         traceback.print_exc()
         raise CalendarServiceError("톡캘린더 리스트를 가져올 수 없습니다", e)
     
 def register_schedule(access_token: str, plan: list) -> Dict[str, Any]:
-    url= f"{CALENDAR_BASE_URL}/create/event"
+    url= f"{KAKAO_BASE_URL}/calendar/create/event"
     headers= {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/x-www-form-urlencoded"
     }
+    seoul_tz= pytz.timezone("Asia/Seoul")
     schedules= []
     for day_item in plan:
         for date_str, time_str in day_item.items():
             for part_of_day, items in time_str.items():
                 for item in items:
                     start_time_str = f"{date_str}T{item['time']}:00"
-                    start_dt = datetime.strptime(start_time_str, "%Y-%m-%dT%H:%M:%S")
-                    end_dt = start_dt + timedelta(hours=1, minutes=30)
+                    
+                    original_start_dt= datetime.strptime(start_time_str, "%Y-%m-%dT%H:%M:%S")
+                    converted_start_dt= seoul_tz.localize(original_start_dt)
+                    end_dt = converted_start_dt + timedelta(hours=1, minutes=30)
                     schedules.append(
                         {
                             "title": item["description"][:40],
                             "time": {
-                                "start_at": start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
-                                "end_at": end_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                                "start_at": converted_start_dt.isoformat(),
+                                "end_at": end_dt.isoformat,
                                 "time_zone": "Asia/Seoul"
                             },
                             "description": item["description"]
@@ -129,7 +136,7 @@ def register_schedule(access_token: str, plan: list) -> Dict[str, Any]:
             raise CalendarServiceError("일정 등록을 할 수 없습니다.", e)
     return created_event
 def update_schedule(access_token: str, event_id: str, event: Dict) -> Dict[str, Any]:
-    url= f"{CALENDAR_BASE_URL}/update/event/host"
+    url= f"{KAKAO_BASE_URL}/calendar/update/event/host"
     headers= {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
@@ -151,10 +158,77 @@ def update_schedule(access_token: str, event_id: str, event: Dict) -> Dict[str, 
 def delete_schedule(access_token: str, remove_id: int) -> Dict[str, Any]:
     try:
         headers= {
-            "Authorization": f"Bearer {access_token}"
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/x-www-form-urlencoded"
         }
-        res= requests.delete(f"{CALENDAR_BASE_URL}/delete/calendar?calendar_id={remove_id}", headers= headers)
+        res= requests.delete(f"{KAKAO_BASE_URL}/calendar/delete/calendar?calendar_id={remove_id}", headers= headers)
+        print()
+        print("delete res", res.json())
+        print()
         res.raise_for_status()
         return res.json()
     except Exception as e:
         raise CalendarServiceError("캘린더 삭제 에러", e)
+
+def get_friends_list(access_token: str):
+    url= "https://kapi.kakao.com/v1/api/talk/friends"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    try:
+        res= requests.get(url, headers= headers)
+        print("friend list", res.json())
+        res.raise_for_status()
+        return res.json()
+    except Exception as e:
+        raise SharingServiceError("친구 목록을 가져올 수 없습니다.", e)
+    
+    
+def send_kakao_message(access_token: str, messages: List[str], receivers: List[str]= None):
+    url= f"{KAKAO_BASE_URL}/talk/{ 'frields' if receivers else 'memo' }/default/send"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    
+    cnt= 0
+    
+    for message in messages:
+        try:
+            template_object = {
+                "object_type": "text",
+                "text": message,
+                "link": {
+                    "web_url": "http://localhost:8501",
+                    "mobile_web_url": "http://localhost:8501"
+                },
+                "button_title": "플래너 열기"
+            }
+            template_json= json.dumps(template_object, ensure_ascii= False).replace("'", "\"")
+            object= { "template_object": template_json }
+            if receivers:
+                object["receiver_uuids"]= receivers
+            res= requests.post(url, headers= headers, data= object)
+            res_json= res.json()
+            print()
+            print("message res", res_json)
+            print()
+            res.raise_for_status()
+            
+            if res_json["result_code"] == 0:
+                cnt += 1
+        except Exception as e:
+            traceback.print_exc()
+            raise SharingServiceError("메시지를 전송할 수 없습니다.", e)
+        # encoded_object= json.dumps(template_object, ensure_ascii= False)
+    return f"{len(messages)}건 중 {cnt}건의 메시지 발송 성공했습니다."
+
+    # response = requests.post(
+    #     url,
+    #     headers=headers,
+    #     data={"template_object": json.dumps(template_object)}
+    # )
+
+    # if response.status_code != 200:
+    #     raise Exception(f"카카오톡 메시지 전송 실패: {response.status_code} {response.text}")

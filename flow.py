@@ -1,3 +1,4 @@
+import traceback
 import os
 from datetime import datetime
 from dotenv import load_dotenv
@@ -5,7 +6,7 @@ from dotenv import load_dotenv
 import re
 
 from langchain.agents import tool, create_tool_calling_agent
-from langchain.output_parsers import PydanticOutputParser
+from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
 from langchain.prompts import ChatPromptTemplate, PromptTemplate
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
 # from langchain_core import Runnable
@@ -18,7 +19,7 @@ from constants import PLACE_RECOMMEND_PREFER, SEASON_RECOMMEND_PREFER, PLACE_WOR
 # from tool_service import search_place
 from tools.kakao_tool import search_kakao_places
 from tools.web_search_tool import web_search
-from state import PlannerState, InputAnalysis
+from state import PlannerState, InputAnalysis, ShareIntentOutput
 
 load_dotenv()
 GROQ_API_KEY= os.environ.get("GROQ_API_KEY")
@@ -63,6 +64,12 @@ llm= ChatGroq(
     temperature= 0.7,
     model_name="meta-llama/llama-4-scout-17b-16e-instruct",
     streaming= True
+)
+llm_for_parser= ChatGroq(
+    groq_api_key= GROQ_API_KEY,
+    temperature= 0.7,
+    model_name="meta-llama/llama-4-scout-17b-16e-instruct",
+    streaming= False
 )
 # llm= ChatCohere(
 #     groq_api_key= COHERE_API_KEY,
@@ -158,21 +165,26 @@ def analyze_input(state: PlannerState) -> PlannerState:
     prompt_template = PromptTemplate.from_template(
         """
         Today is {date}.
-        
-        Here is the conversation history so far:
+
+        Below is the conversation history so far:
         {history}
 
-        The current user input is:
+        The user's most recent input is:
         {input}
 
-        Based on the above, extract the following information and return it as a JSON object.
-        Your response must be JSON only. Do not include any explanation.
-        Date handling rule:
-        - If a user says "August 2nd" or similar, and that date has already passed this year, interpret it as the same date **next year**.
-        - If the date is later in this year, use this year.
-        - Always interpret dates **as the nearest future date**.
+        Analyze the conversation and user input, and extract the following fields into a valid **JSON object**. Your response **must be valid JSON only**, with no additional text or explanation.
 
-        Output format:
+        Output Requirements:
+        - All fields must be included even if values are missing. Use `null` explicitly for missing fields.
+        - `travel_places` must always be a **list of strings** (e.g., ["Place1", "Place2"]), even if it's empty.
+        - Do **not** include any explanations, comments, or markdown formatting.
+        - Date Handling Rules:
+        - If the user mentions a month and day (e.g., "August 2nd") that has already passed this year, interpret it as that date **next year**.
+        - If the date is later this year, use this year.
+        - All interpreted dates must represent the **nearest future date**.
+        - Dates must be formatted as "YYYY-MM-DD".
+
+        Output Format:
         {{
             "travel_region": "<Region or city to travel>",
             "travel_places": ["<Place1>", "<Place2>", "..."],
@@ -180,7 +192,33 @@ def analyze_input(state: PlannerState) -> PlannerState:
             "travel_start_date": "<YYYY-MM-DD format>",
             "travel_end_date": "<YYYY-MM-DD format>",
             "travel_duration": "<Trip duration (e.g., 1 night 2 days, 2 nights 3 days, 4 days)>",
-            "action_type": "<region_suggestion / place_suggestion / itinerary_suggestion / restaurant_suggestion / accommodation_suggestion / transit_suggestion / registration_request / modification_request / unclear / positive / negative>"
+            "action_type": "<region_suggestion / place_suggestion / itinerary_suggestion / restaurant_suggestion / accommodation_suggestion / transit_suggestion / registration_request / modification_request / share_kakao (user wants to share itinerary via KakaoTalk) / unclear / positive / negative>"
+        }}
+
+        Example 1:
+        Input: "Plan a trip to Jeju from June 1st to June 3rd"
+        Output:
+        {{
+            "travel_region": "Jeju",
+            "travel_places": ["Hallasan", "Hyeopjae Beach"],
+            "travel_season_or_month": null,
+            "travel_start_date": "2025-06-01",
+            "travel_end_date": "2025-06-03",
+            "travel_duration": "2 nights 3 days",
+            "action_type": "itinerary_suggestion"
+        }}
+
+        Example 2:
+        Input: "카카오톡으로 여행 일정을 공유해줘"
+        Output:
+        {{
+            "travel_region": null,
+            "travel_places": [],
+            "travel_season_or_month": null,
+            "travel_start_date": null,
+            "travel_end_date": null,
+            "travel_duration": null,
+            "action_type": "share_kakao"
         }}
         """
     )
@@ -193,6 +231,7 @@ def analyze_input(state: PlannerState) -> PlannerState:
             history_text += f"플래너: {msg.content}\n"
     
     parser= PydanticOutputParser(pydantic_object= InputAnalysis)
+    parser= OutputFixingParser.from_llm(parser= parser, llm= llm_for_parser)
     chain= prompt_template | llm | parser
     
     try:
@@ -209,6 +248,7 @@ def analyze_input(state: PlannerState) -> PlannerState:
         state.previous_node= state.current_node
         state.current_node= result.action_type
     except Exception as e:
+        traceback.print_exc()
         print(f"[ERROR] Failed to parse input: {e}")
     print("analyze input")
     return state
@@ -373,6 +413,9 @@ def suggest_transit(state: PlannerState) -> PlannerState:
         state.stream_response= get_tools_streaming_response(state, prompt)
     return state
 
+def share_via_kakao(state:PlannerState) -> PlannerState:
+    return state
+
 def is_positive_confirmation(state: PlannerState) -> bool:
     return (
         state.current_node == "positive" 
@@ -417,6 +460,42 @@ def wants_export_pdf(state: PlannerState) -> bool:
     ]
     export_pattern = r"(pdf|출력|다운로드|저장|인쇄).*(일정|계획)|.*(일정|계획).*(pdf|출력|다운로드|저장|인쇄)"
     return has_string(state.user_input.lower(), export_trigger_phrases) or bool(re.search(export_pattern, state.user_input, re.IGNORECASE))
+def detect_share_intent():
+    prompt= PromptTemplate.from_template(
+    """
+    You are an assistant that detects whether the user wants to share the itinerary via KakaoTalk.
+
+    User input: {user_input}
+
+    Respond with JSON only in the following format:
+    {{
+        "wants_share_kakao": true or false
+    }}
+
+    Respond "true" only if the user clearly intends to share the travel plan through a KakaoTalk message. 
+    Example intents include:
+    - "카카오톡으로 보내줘"
+    - "이 일정을 공유해줘"
+    - "메시지로 공유"
+    - "카카오톡으로 공유해줘"
+
+    Otherwise, respond with false.
+    Do not include any extra explanation.
+    """)
+    parser= PydanticOutputParser(PydanticOutputParser= ShareIntentOutput)
+    parser= OutputFixingParser.from_llm(parser= parser, llm= llm_for_parser)
+    chain= prompt | llm_for_parser | parser
+    
+    def node(state: PlannerState) -> PlannerState:
+        try:
+            result= chain.invoke({ "user_input": state.user_input })
+            state.wants_share_plan= result.wants_share_kakao
+        except Exception as e:
+            print("[detect share intent] Error: ", e)
+            state.wants_share_plan= False
+        return state
+    return node
+            
 
 def has_minimum_required_info(state: PlannerState) -> bool:
     return state.travel_region and state.travel_start_date and state.travel_end_date
@@ -435,6 +514,12 @@ def wants_transit_suggestion(state: PlannerState) -> bool:
         state.user_input,
         ["교통", "지하철", "버스", "수단", "어떻게 이동", "경로"]
     )
+def is_kakao_message_requrest(state: PlannerState) -> bool:
+    prompt= state.user_input.strip().lower()
+    share_keywords= [
+        "카카오톡", "카톡", "카카오", "공유", "메시지", "메세지", "톡으로", "카카오로", "카카오에", "공유", "보내줘"
+    ]
+    return any(keyword in prompt for keyword in share_keywords)
 def check_kakao_login(state: PlannerState)->bool:
     return has_string(state.user_input.lower(), ["카카오", "kakao", "로그인", "login", "계정 연결"])
 

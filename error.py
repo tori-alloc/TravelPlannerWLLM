@@ -5,3 +5,6 @@ class AppError(Exception):
 
 class CalendarServiceError(AppError):
     pass
+
+class SharingServiceError(AppError):
+    pass
