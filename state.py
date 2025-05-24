@@ -1,10 +1,24 @@
 from pydantic import BaseModel, Field, RootModel
-from typing import List, Optional, Generator, Dict
+from typing import List, Optional, Generator, Dict, Literal, Union
 from langchain.schema import BaseMessage
 
+class LocationItem(BaseModel):
+    title: Optional[str]= None
+    description: Optional[str]= None
+    address: Optional[str]= None
+class TransitItem(BaseModel):
+    vehicle: Optional[str]= None
+    vehicle_detail: Optional[str]= None
+    time: Optional[str]= None
+    source: Optional[str]= None
+    destination: Optional[str]= None
 class ScheduleItem(BaseModel):
     time: str
     description: str
+    category: Optional[Literal["activity", "restaurant", "accommodation", "transport"]] = "activity"
+    source: Optional[str]= None
+    location: Optional[LocationItem]= None
+    transit: Optional[Union[str, List[TransitItem]]]= None
 
 class DayPlan(RootModel):
     root: List[Dict[str, Dict[str, List[ScheduleItem]]]]
@@ -16,6 +30,7 @@ class InputAnalysis(BaseModel):
     travel_start_date: Optional[str]= None
     travel_end_date: Optional[str]= None
     travel_duration: Optional[str]= None
+    travel_vehicle: Optional[str]= None
     action_type: Optional[str]
 
 class PlannerState(BaseModel):

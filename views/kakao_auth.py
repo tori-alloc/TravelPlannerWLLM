@@ -42,26 +42,14 @@ def get_kakao_profile(access_token: str):
     return res.json()
 
 def run_kakao_login_view(temp_key: str):
-    print("temp key", temp_key)
     temp_key_restore= False
     restored_temp_key= temp_key
-    print("t 1")
     if not "temp_key" in st.session_state or isinstance(st.session_state.temp_key, str):
-        print("t 2")
         if "state" in st.query_params:
-            print("t 3")
-            print("state ", st.query_params["state"])
-            print("restored temp key", temp_key)
             restored_temp_key= st.query_params["state"]
             temp_key_restore= True
-        print("restored temp key", restored_temp_key)
         st.session_state.temp_key= restored_temp_key
-        
-    print("k 1")
     st.title= ("카카오 로그인 중 ...")
-    
-    
-    
     if "code" in st.query_params:
         code= st.query_params["code"]
         token_info= get_kakao_token(code)
@@ -69,12 +57,8 @@ def run_kakao_login_view(temp_key: str):
             if not restored_temp_key in server_state:
                 server_state[restored_temp_key]= {}
             server_state[restored_temp_key]["kakao_token"]= token_info
-        # with server_state_lock["kakao_token"]:
-        #     server_state["kakao_token"]= token_info
         if "access_token" in token_info:
             profile= get_kakao_profile(token_info["access_token"])
-            # with server_state_lock["kakao_info"]:
-            #     server_state["kakao_info"]= profile
             with server_state_lock[restored_temp_key]:
                 server_state[restored_temp_key]["kakao_info"]= profile
             st.success(f"{profile['properties']['nickname']}님, 카카오 로그인 되었습니다.")
@@ -89,5 +73,4 @@ def run_kakao_login_view(temp_key: str):
             st.error(f"카카오 로그인 실패: {token_info}")
     else:
         st.warning("카카오 로그인 코드가 없습니다.")
-    print("temp key", restored_temp_key)
     return restored_temp_key if temp_key_restore else None

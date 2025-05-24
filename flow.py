@@ -17,6 +17,7 @@ from typing import Optional, List
 
 from constants import PLACE_RECOMMEND_PREFER, SEASON_RECOMMEND_PREFER, PLACE_WORD, NEGATIVE_WORD
 # from tool_service import search_place
+from utils.for_llm import get_llm
 from tools.kakao_tool import search_kakao_places
 from tools.web_search_tool import web_search
 from state import PlannerState, InputAnalysis, ShareIntentOutput
@@ -59,31 +60,29 @@ Never deviate from this guide and always act according to these standards.
 """)
 
 tools= [ search_kakao_places, web_search ]
-llm= ChatGroq(
-    groq_api_key= GROQ_API_KEY,
-    temperature= 0.7,
-    model_name="meta-llama/llama-4-scout-17b-16e-instruct",
-    streaming= True
+llm= get_llm(
+    platform= "groq", 
+    model_name= "meta-llama/llama-4-scout-17b-16e-instruct", 
+    streaming= True, 
+    temperature= 0.7
 )
-llm_for_parser= ChatGroq(
-    groq_api_key= GROQ_API_KEY,
-    temperature= 0.7,
-    model_name="meta-llama/llama-4-scout-17b-16e-instruct",
-    streaming= False
+llm_for_parser= get_llm(
+    platform= "groq", 
+    model_name= "meta-llama/llama-4-scout-17b-16e-instruct", 
+    streaming= False, 
+    temperature= 0.7
 )
-# llm= ChatCohere(
-#     groq_api_key= COHERE_API_KEY,
-#     temperature= 0.7,
-#     # model_name="meta-llama/llama-4-scout-17b-16e-instruct",
-#     model_name="embed-multilingual-v3.0",
-#     streaming= True
+# llm= get_llm(
+#     platform= "cohere", 
+#     model_name= "embed-multilingual-v3.0", 
+#     streaming= True, 
+#     temperature= 0.7
 # )
-# tool_llm= ChatCohere(
-#     groq_api_key= COHERE_API_KEY,
-#     temperature= 0.7,
-#     # model_name="meta-llama/llama-4-scout-17b-16e-instruct",
-#     model_name="embed-multilingual-v3.0",
-#     streaming= True
+# llm_for_parser= get_llm(
+#     platform= "cohere", 
+#     model_name= "embed-multilingual-v3.0", 
+#     streaming= False, 
+#     temperature= 0.7
 # )
 tool_calling_llm= create_tool_calling_agent(
     # llm= llm,
@@ -118,26 +117,33 @@ def get_streaming_response(state: PlannerState, prompt: str, system: Optional[Sy
             state.chat_history.append(AIMessage(content= response_accumulator))
     return stream_gen()
 def get_tools_streaming_response(state: PlannerState, prompt: str, system: Optional[SystemMessage]= None):
-    messages= []
-    messages.append(TOOL_GUARDRAIL_MESSAGE)
-    if system:
-        messages.append(system)
+    # messages= []
+    # messages.append(TOOL_GUARDRAIL_MESSAGE)
+    # if system:
+    #     messages.append(system)
     # messages.extend(state.chat_history)
-    user_message= HumanMessage(content= prompt)
-    messages.append(user_message)
+    # user_message= HumanMessage(content= prompt)
+    # messages.append(user_message)
+    input_text= "\n\n".join([system.content, prompt]) if system else prompt
+    
+    input_dict = {
+        "input": input_text,
+        "chat_history": state.chat_history,
+        "intermediate_steps": []
+    }
     
     response_accumulator= ""
     def stream_gen():
         nonlocal response_accumulator
         current_text= ""
-        for chunk in tool_calling_llm.stream(messages):
+        for chunk in tool_calling_llm.stream(input_dict):
             if hasattr(chunk, "content"):
                 content= chunk.content or ""
                 current_text += content
                 yield content
         response_accumulator= current_text
         if response_accumulator:
-            state.chat_history.append(user_message)
+            state.chat_history.append(HumanMessage(content= prompt))
             state.chat_history.append(AIMessage(content= response_accumulator))
     return stream_gen()
 
@@ -192,6 +198,7 @@ def analyze_input(state: PlannerState) -> PlannerState:
             "travel_start_date": "<YYYY-MM-DD format>",
             "travel_end_date": "<YYYY-MM-DD format>",
             "travel_duration": "<Trip duration (e.g., 1 night 2 days, 2 nights 3 days, 4 days)>",
+            "travel_vehicle": "<대중교통 / 자동차>",
             "action_type": "<region_suggestion / place_suggestion / itinerary_suggestion / restaurant_suggestion / accommodation_suggestion / transit_suggestion / registration_request / modification_request / share_kakao (user wants to share itinerary via KakaoTalk) / unclear / positive / negative>"
         }}
 
@@ -205,6 +212,7 @@ def analyze_input(state: PlannerState) -> PlannerState:
             "travel_start_date": "2025-06-01",
             "travel_end_date": "2025-06-03",
             "travel_duration": "2 nights 3 days",
+            "travel_vehicle": null,
             "action_type": "itinerary_suggestion"
         }}
 
@@ -218,7 +226,23 @@ def analyze_input(state: PlannerState) -> PlannerState:
             "travel_start_date": null,
             "travel_end_date": null,
             "travel_duration": null,
+            "travel_vehicle": null,
             "action_type": "share_kakao"
+        }}
+        
+        Example 3:
+        
+        Input: "8월에 대중교통으로 여행할만한 곳 없을까? 일정은 3일정도 생각하고 있어"
+        Output:
+        {{
+            "travel_region": null,
+            "travel_places": [],
+            "travel_season_or_month": "August",
+            "travel_start_date": null,
+            "travel_end_date": null,
+            "travel_duration": "2 nights 3 days",
+            "travel_vehicle": "대중교통",
+            "action_type": "region_suggestion"
         }}
         """
     )
@@ -239,12 +263,15 @@ def analyze_input(state: PlannerState) -> PlannerState:
         state.travel_region= result.travel_region or state.travel_region
         state.travel_places= result.travel_places or state.travel_places
         state.travel_season_or_month= result.travel_season_or_month or state.travel_season_or_month
-        state.travel_start_date= ensure_future_date(result.travel_start_date or state.travel_start_date)
+        if result.travel_start_date or state.travel_start_date:
+            state.travel_start_date= ensure_future_date(result.travel_start_date or state.travel_start_date)
         # state.travel_end_date= result.travel_end_date or state.travel_end_date
         # state.travel_duration= result.travel_duration or state.travel_duration
         # state.travel_start_date= ensure_future_date(result.travel_start_date) if result.travel_start_date else state.travel_start_date
-        state.travel_end_date= ensure_future_date(result.travel_end_date or state.travel_end_date)
+        if result.travel_end_date or state.travel_end_date:
+            state.travel_end_date= ensure_future_date(result.travel_end_date or state.travel_end_date)
         state.travel_duration= result.travel_duration or state.travel_duration
+        state.travel_vehicle= result.travel_vehicle or state.travel_vehicle
         state.previous_node= state.current_node
         state.current_node= result.action_type
     except Exception as e:
@@ -254,6 +281,7 @@ def analyze_input(state: PlannerState) -> PlannerState:
     return state
 
 def supervise_input(state: PlannerState) -> PlannerState:
+    print("supervise input")
     prompt= (
         f"The user said: '{state.user_input}'. "
         "Based on the information so far, please recommend travel destinations.\n"
@@ -399,14 +427,17 @@ def export_plan_to_pdf(state: PlannerState) -> PlannerState:
     return state
 
 def suggest_accommodations(state: PlannerState) -> PlannerState:
+    print("suggest accommodations")
     prompt= f"{state.travel_region} 근처 숙소를 추천해주세요. 일정의 모든 여행지를 10분 이내에 도달할 수 있는지 먼저 찾아보고, 검색되는 숙소가 없을 경우 검색하는 반경을 이동시간 5분씩 늘려가며 검색하세요. 평점 3점 미만인 숙소는 추천하지 마세요."
     state.stream_response= get_tools_streaming_response(state, prompt)
     return state
 def suggest_restaurants(state: PlannerState) -> PlannerState:
+    print("suggest restaurants")
     prompt= f"{state.travel_region} 근처의 맛집을 일정에 따라 찾아주세요. 각 일정으로부터 이동했을 경우를 고려하여 이동시간 최소 5분이 걸리는 거리 내의 음식점부터 검색하며, 검색되는 음식점이 없을 경우, 검색하는 반경을 이동시간 5분씩 늘려가며 검색하세요. 평점 4점 이상인 음식점만 추천해주세요"
     state.stream_response= get_tools_streaming_response(state, prompt)
     return state
 def suggest_transit(state: PlannerState) -> PlannerState:
+    print("suggest transit")
     if state.travel_vehicle in ["도보", "대중교통", "기차", "버스", "지하철", "전철", "트램", "걸어서", "차없이", "차 없이"]:
         prompt= f"{state.travel_region}을 여행하는 일정에 따라 여행지, 다음 목적지, 혹은 숙소로 이동할 때 이용할 이동 교통편을 구체적으로 알려주세요. 도보일 경우 도보 몇 분인지, 버스를 타야할 경우 어떤 버스를 어떤 정류장에서 타서 어떤 정류장에서 내려야하는지, 여러 교통편을 섞어서 이용할 경우 어떻게 이동하다가 어떤 교통편으로 어떻게 갈아타는지 등 이동 교통편에 대한 정보를 상세히 알려주세요."
         # state.stream_response= get_streaming_response(state, prompt)

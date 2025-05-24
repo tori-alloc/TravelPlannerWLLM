@@ -21,6 +21,7 @@ from langchain.schema import HumanMessage, SystemMessage, AIMessage
 from langgraph.graph import StateGraph, END
 import pytz
 
+from utils.for_llm import get_llm
 from state import PlannerState, DayPlan
 from flow import build_flexible_planner_graph
 from tools.kakao_tool import get_schedule_list, register_schedule, update_schedule, delete_schedule, get_friends_list, send_kakao_message
@@ -72,14 +73,14 @@ def get_streaming_response(llm, state: PlannerState, prompt: str, system: System
     return stream_gen()
 
 def parse_markdown_to_json(llm):
-    llm_parser= ChatGroq(
-        groq_api_key= GROQ_API_KEY,
-        model= "meta-llama/llama-4-scout-17b-16e-instruct",
-        temperature= 0.7,
-        streaming= False
+    llm_for_parser= get_llm(
+        platform= "groq", 
+        model_name= "meta-llama/llama-4-scout-17b-16e-instruct", 
+        streaming= False, 
+        temperature= 0.7
     )
     parser= PydanticOutputParser(pydantic_object=DayPlan)
-    parser= OutputFixingParser.from_llm(parser= parser, llm= llm_parser)
+    parser= OutputFixingParser.from_llm(parser= parser, llm= llm_for_parser)
     prompt= PromptTemplate.from_template("""
     You are given a travel itinerary in Korean markdown format.
 
@@ -131,6 +132,7 @@ def parse_markdown_to_json(llm):
     
     chain= prompt | llm | parser
     result= chain.invoke({ "plan" : st.session_state.planner_state.detail_plan })
+    print("parse markdown to json result", result)
     st.session_state.planner_state.detail_plan_json= result
 
 def convert_detail_plan_json_to_text(plan_json: List[Dict[str, Dict[str, List[Dict]]]]) -> str:
@@ -333,17 +335,17 @@ def run_chatbot_ui(temp_key: str):
     if not ("temp_key" in st.session_state and st.session_state.temp_key):
         st.session_state.temp_key= temp_key
         
-    llm= ChatGroq(
-        groq_api_key= GROQ_API_KEY,
-        model_name= "meta-llama/llama-4-scout-17b-16e-instruct",
-        temperature= 0.7,
-        streaming= True
+    llm= get_llm(
+        platform= "groq", 
+        model_name= "meta-llama/llama-4-scout-17b-16e-instruct", 
+        streaming= True, 
+        temperature= 0.7
     )
-    # llm= ChatCohere(
-    #     groq_api_key= COHERE_API_KEY,
-    #     temperature= 0.7,
-    #     model_name="embed-multilingual-v3.0",
-    #     streaming= True
+    # llm= get_llm(
+    #     platform= "cohere", 
+    #     model_name= "embed-multilingual-v3.0", 
+    #     streaming= True, 
+    #     temperature= 0.7
     # )
 
     if "chat_history" not in st.session_state:
@@ -427,35 +429,41 @@ def run_chatbot_ui(temp_key: str):
         state.user_input= user_prompt
         state.chat_history.append(HumanMessage(content=user_prompt))
         
+        print(type(st.session_state.planner_state.detail_plan_json))
+        print(type(st.session_state.planner_state.detail_plan_json.root[0]))
+
+        
         graph= build_flexible_planner_graph()
         res_dict= graph.invoke(state)
         
         for key, value in res_dict.items():
             if key != "stream_response" and key != "chat_history" and hasattr(state, key):
                 setattr(state, key, value)
-        
-        if "stream_response" in res_dict and res_dict["stream_response"] is not None:
-            stream_chunks= []
-            
-            full_text= ""
-            for chunk in res_dict["stream_response"]:
-                stream_chunks.append(chunk)
-                full_text += chunk
-                stream_container.markdown(f"🙋 사용자: {user_prompt}\n🤖 AI: {full_text}")
-            if stream_chunks:
-                content= "".join(stream_chunks)
-                state.chat_history.append(AIMessage(content= content))
-                st.session_state.last_response_text= content
-                
-                if state.current_node == "itinerary_suggestion":
-                    state.detail_plan= content
-                    parse_markdown_to_json(llm)
         if state.current_node == "share_kakao":
             state.wants_share_plan= True
             state.chat_history.append( ( "kakao_share", None ) )
             with calendar_container:
+                st.write(f"🙋 사용자: {user_prompt}\n")
                 if st.button("카카오톡으로 공유하기", key="sharing_with_kakao"):
                     share_schedule(calendar_container)
+        else:
+            if "stream_response" in res_dict and res_dict["stream_response"] is not None:
+                stream_chunks= []
+                
+                full_text= ""
+                for chunk in res_dict["stream_response"]:
+                    stream_chunks.append(chunk)
+                    full_text += chunk
+                    stream_container.markdown(f"🙋 사용자: {user_prompt}\n🤖 AI: {full_text}")
+                if stream_chunks:
+                    content= "".join(stream_chunks)
+                    state.chat_history.append(AIMessage(content= content))
+                    st.session_state.last_response_text= content
+                    
+                    if state.current_node == "itinerary_suggestion":
+                        state.detail_plan= content
+                        parse_markdown_to_json(llm)
+        
             
         if state.current_node == "registration_request":
             state.is_registering_calendar = True
