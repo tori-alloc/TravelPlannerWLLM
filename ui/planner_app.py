@@ -23,11 +23,11 @@ from langgraph.graph import StateGraph, END
 import pytz
 
 from utils.for_llm import get_llm
-from project.kb.app.state import PlannerState, DayPlan, ScheduleItem, LocationItem, TransitItem
-from project.kb.app.flow import build_flexible_planner_graph
-from tools.kakao_tool import get_schedule_list, register_schedule, update_schedule, delete_schedule, get_friends_list, send_kakao_message
-from project.kb.utils.error import CalendarServiceError, SharingServiceError
-from project.kb.app.session import get_session_id, get_temp_key
+from app.state import PlannerState, DayPlan, ScheduleItem, LocationItem, TransitItem
+from app.flow import build_flexible_planner_graph
+from services.kakao import get_schedule_list, register_schedule, update_schedule, delete_schedule, get_friends_list, send_kakao_message
+from app.error import CalendarServiceError, SharingServiceError
+from app.session import get_session_id, get_temp_key
 
 load_dotenv()
 GROQ_API_KEY= os.environ.get("GROQ_API_KEY")

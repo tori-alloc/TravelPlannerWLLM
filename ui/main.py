@@ -1,6 +1,6 @@
 import streamlit as st
 from ui import planner_app, kakao_auth
-from project.kb.app.session import get_temp_key, get_session_id
+from app.session import get_temp_key, get_session_id
 
 query_params= st.query_params
 is_exist_code= query_params.get("code", None)

@@ -8,8 +8,8 @@ import pytz
 import urllib.parse
 from typing import Dict, Any, List
 from dotenv import load_dotenv
-from project.kb.app.state import DayPlan
-from project.kb.utils.error import CalendarServiceError, SharingServiceError
+from app.state import DayPlan
+from app.error import CalendarServiceError, SharingServiceError
 
 load_dotenv()
 KAKAO_API_KEY= os.environ.get("KAKAO_API_KEY")

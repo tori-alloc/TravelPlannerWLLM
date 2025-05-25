@@ -15,12 +15,12 @@ from langchain_cohere import ChatCohere
 from langgraph.graph import StateGraph, END
 from typing import Optional, List, Dict
 
-from project.kb.app.constants import PLACE_RECOMMEND_PREFER, SEASON_RECOMMEND_PREFER, PLACE_WORD, NEGATIVE_WORD
+from app.constants import PLACE_RECOMMEND_PREFER, SEASON_RECOMMEND_PREFER, PLACE_WORD, NEGATIVE_WORD
 # from tool_service import search_place
 from utils.for_llm import get_llm
-from tools.kakao_tool import search_kakao_places
+from services.kakao import search_kakao_places
 from tools.web_search_tool import web_search
-from project.kb.app.state import PlannerState, InputAnalysis, ShareIntentOutput, ScheduleItem, DayPlan, LocationItem
+from app.state import PlannerState, InputAnalysis, ShareIntentOutput, ScheduleItem, DayPlan, LocationItem
 
 load_dotenv()
 GROQ_API_KEY= os.environ.get("GROQ_API_KEY")
