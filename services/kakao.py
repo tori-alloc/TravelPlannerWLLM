@@ -16,55 +16,6 @@ KAKAO_API_KEY= os.environ.get("KAKAO_API_KEY")
 GOOGLE_OAUTH_CLIENT_ID= os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
 GOOGLE_OAUTH_CLIENT_SECRET= os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
 
-@tool
-def search_kakao_places(
-    query: str,
-    location: str= "",
-    radius: int= 10000,
-    size: int= 5
-) -> list[str]:
-    """
-    Kakao Map API를 이용해서 특정 키워드와 위치 기준으로 장소를 검색합니다.
-
-    Args:
-        query (str): _description_
-        location (str, optional): _description_. Defaults to "".
-        radius (int, optional): _description_. Defaults to 10000.
-        size (int, optional): _description_. Defaults to 5.
-
-    Returns:
-        list[str]: _description_
-    """
-    headers= {
-        "Authorization": f"KakaoAK {KAKAO_API_KEY}"
-    }
-    params= {
-        "query": query
-    }
-    if location: 
-        lat, lng= location.split(",")
-        params.update(
-            {
-                "x": lng,
-                "y": lat,
-                "radius": radius,
-                "sort": "distance"
-            }
-        )
-    res= requests.get(
-        "https://dapi.kakao.com/v2/local/search/keyword.json",
-        headers= headers,
-        params= params
-    )
-    data= res.json()
-    
-    if "documents" not in data or not data["documents"]:
-        return ["empty"]
-    return [
-        f"{doc['place_name']} - {doc.get('road_address_name', doc['address_name'])}"
-        for doc in data["documents"]
-    ]
-
 KAKAO_BASE_URL= "https://kapi.kakao.com/v2/api"
 def get_schedule_list(access_token: str, start_date: str, end_date: str) -> Dict[str, Any]:
     url= f"{KAKAO_BASE_URL}/calendar/events?time_zone=Asia/Seoul&from={start_date}T00:00:00Z&to={end_date}T23:59:59Z"
@@ -74,10 +25,7 @@ def get_schedule_list(access_token: str, start_date: str, end_date: str) -> Dict
     try:
         res= requests.get(url, headers= headers)
         res.raise_for_status()
-        # print()
-        # print(res.json())
-        # print()
-        
+
         return res.json()
     except Exception as e:
         traceback.print_exc()
@@ -127,7 +75,6 @@ def register_schedule(access_token: str, plan: list) -> List[Dict[str, Any]]:
             )
             res.raise_for_status()
             res_json= res.json()
-            # created_event.append(res_json["event_id"])
             created_event.append(
                 {
                     "event_id": res_json["event_id"],
@@ -216,9 +163,6 @@ def send_kakao_message(access_token: str, messages: List[str], receivers: List[s
                 object["receiver_uuids"]= receivers
             res= requests.post(url, headers= headers, data= object)
             res_json= res.json()
-            print()
-            print("message res", res_json)
-            print()
             res.raise_for_status()
             
             if res_json["result_code"] == 0:
@@ -226,14 +170,4 @@ def send_kakao_message(access_token: str, messages: List[str], receivers: List[s
         except Exception as e:
             traceback.print_exc()
             raise SharingServiceError("메시지를 전송할 수 없습니다.", e)
-        # encoded_object= json.dumps(template_object, ensure_ascii= False)
     return f"{len(messages)}건 중 {cnt}건의 메시지 발송 성공했습니다."
-
-    # response = requests.post(
-    #     url,
-    #     headers=headers,
-    #     data={"template_object": json.dumps(template_object)}
-    # )
-
-    # if response.status_code != 200:
-    #     raise Exception(f"카카오톡 메시지 전송 실패: {response.status_code} {response.text}")

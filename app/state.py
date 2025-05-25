@@ -79,5 +79,4 @@ class ScheduleModifyRequestItem(BaseModel):
     date: Optional[str]= None
     description: Optional[str]= None
 class ScheduleModifyRequest(BaseModel):
-    # schedules: Optional[List[ScheduleModifyRequestItem]]= None
     schedules: Optional[List[CalendarEvent]]= None

@@ -10,7 +10,6 @@ from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from typing import Optional, List, Dict
 
-from app.constants import PLACE_RECOMMEND_PREFER, SEASON_RECOMMEND_PREFER, PLACE_WORD, NEGATIVE_WORD
 from utils.for_llm import get_llm
 from app.state import PlannerState, InputAnalysis, ShareIntentOutput, ScheduleItem, DayPlan, LocationItem, ScheduleModifyRequest, ScheduleModifyRequestItem, CalendarEvent
 from utils.decorators import safe_node
@@ -182,6 +181,34 @@ def analyze_input(state: PlannerState) -> PlannerState:
             "travel_duration": null,
             "travel_vehicle": null,
             "action_type": "registration_request"
+        }}
+        
+        Example 5:
+        Input: "8월 2일 일정 중 오전 9시에 예약된 성산 일출봉 방문 일정을 10시로 수정해줘"
+        Output:
+        {{
+            "travel_region": null,
+            "travel_places": [],
+            "travel_season_or_month": null,
+            "travel_start_date": null,
+            "travel_end_date": null,
+            "travel_duration": null,
+            "travel_vehicle": null,
+            "action_type": "update_request"
+        }}
+        
+        Example 6:
+        Input: "8월 2일 일정 중 오전 9시에 예약된 성산 일출봉 방문 일정을 취소해줘"
+        Output:
+        {{
+            "travel_region": null,
+            "travel_places": [],
+            "travel_season_or_month": null,
+            "travel_start_date": null,
+            "travel_end_date": null,
+            "travel_duration": null,
+            "travel_vehicle": null,
+            "action_type": "delete_request"
         }}
         """
     )
@@ -364,15 +391,14 @@ def finalize_plan(state: PlannerState) -> PlannerState:
     return state
 
 def register_calendar(state: PlannerState) -> PlannerState:
-    print("register calendar")
     confirm= "계획이 확정되었습니다. 캘린더에 등록할게요"
-    # state.stream_response= get_streaming_response(state, confirm)
     state.stream_response= None
     state.other_response= confirm
     return state
 def update_calendar(state: PlannerState) -> PlannerState:
+    registered_events = state.registered_events or []  # None일 경우 빈 리스트로 대체
     registered_json = json.dumps(
-        [event.model_dump() if hasattr(event, "model_dump") else event for event in state.registered_events],
+        [event.model_dump() if hasattr(event, "model_dump") else event for event in registered_events],
         ensure_ascii=False
     )
     
@@ -384,6 +410,15 @@ def update_calendar(state: PlannerState) -> PlannerState:
 
     User input:
     "{user_input}"
+    
+    Input Example 1:
+    "8월 2일 일정 중 오전 9시에 예정되어있는 성산 일출봉 방문을 오전 10시로 수정해줘"
+    
+    Input Example 2:
+    "1월 1일 일정 중 오전 6시에 예정되어있는 일출 구경을 오전 6시 30분으로 변경해줘"
+    
+    Input Example 3:
+    "8월 10일 일정 중 오전 9시에 예정되어있는 성산 일출봉 방문을 기념품 샵 방문으로 옮겨줘"
 
     Based on the above list and the user's intent, find the single most relevant event to update.
     Extract the modification information in the following format:
@@ -393,10 +428,10 @@ def update_calendar(state: PlannerState) -> PlannerState:
             "event_id": "original_event_id",
             "title": "수정할 새로운 제목 또는 null",
             "description": "수정할 새로운 설명 또는 null",
-            "time": {
+            "time": {{
                 "start_at": "수정할 새로운 start_at 또는 null",
                 "end_at": "수정할 새로운 end_at 또는 null"
-            }
+            }}
         }},
         ...
     ]
@@ -414,23 +449,25 @@ def update_calendar(state: PlannerState) -> PlannerState:
             "user_input": state.user_input,
             "registered_events": registered_json
         })
+        
+        res= result.schedules
 
-        # result.event_id는 이제 LLM이 추출한 event_id
         state.schedule_for_modify = [
             CalendarEvent(
-                event_id=result.event_id,
-                title=result.new_title or "",  # fallback
-                description=result.new_description or "",
-                time={}  # 시간 수정 안할 거면 생략해도 됨
-            )
+                event_id=res_item.event_id,
+                title=res_item.title or "",
+                description=res_item.description or "",
+                time=res_item.time
+            ) for res_item in res
         ]
         state.schedule_modify= "delete"
     except Exception as e:
         print("[update_calendar] error", e)
     return state
 def delete_calendar(state: PlannerState) -> PlannerState:
+    registered_events = state.registered_events or []
     registered_json = json.dumps(
-        [event.model_dump() if hasattr(event, "model_dump") else event for event in state.registered_events],
+        [event.model_dump() if hasattr(event, "model_dump") else event for event in registered_events],
         ensure_ascii=False
     )
     
@@ -442,6 +479,15 @@ def delete_calendar(state: PlannerState) -> PlannerState:
 
     User input:
     "{user_input}"
+    
+    Input Example 1:
+    "8월 2일 일정 중 오전 9시에 예정되어있는 성산 일출봉 방문을 취소해줘"
+    
+    Input Example 2:
+    "1월 1일 일정 중 오전 11시에 예정되어있는 강릉에서 점심식사 일정을 취소해줘"
+    
+    Input Example 3:
+    "8월 10일 일정 중 오후 2시에 예정되어있는 기념품 샵 방문을 안하고 쉴래"
 
     Based on the list, extract all events the user clearly wants to delete.
 
@@ -465,11 +511,12 @@ def delete_calendar(state: PlannerState) -> PlannerState:
             "user_input": state.user_input,
             "registered_events": registered_json
         })
-
-        # schedule_for_modify 에 삭제 대상만 저장
+        
+        res= result.schedules
+        
         state.schedule_for_modify = [
-            CalendarEvent(event_id=eid, title="", description="", time={})
-            for eid in result.event_ids
+            CalendarEvent(event_id=res_item.event_id, title="", description="", time={})
+            for res_item in res
         ]
         state.schedule_modify= "delete"
     except Exception as e:
@@ -502,39 +549,10 @@ def convert_detail_plan_json_to_text(plan_json: List[Dict[str, Dict[str, List[Sc
                     lines.append(f"- [{part}]")
                     for event in events:
                         lines.append(f"{event['time']} {event['description']}")
-            lines.append("")  # 날짜 간 구분
+            lines.append("")
 
     return "\n".join(lines).strip()
 
-def is_positive_confirmation(state: PlannerState) -> bool:
-    return (
-        state.current_node == "positive" 
-        or has_string(state.user_input, ["네", "응", "좋아", "그래", "할게", "정할게", "좋습니다", "그대로"])
-    )
-def is_negative_confirmation(state: PlannerState) -> bool:
-    return state.current_node == "negative" or has_string(state.user_input, ["아니", "다른", "싫어", "별로"])
-def is_schedule_request(state: PlannerState) -> bool: 
-    if state.current_node != "itinerary_suggestion":
-        return False
-    if not state.travel_region:
-        return False
-    if not state.travel_duration:
-        return False
-    return True
-
-def is_place_request(state: PlannerState) -> bool:
-    return (
-        state.current_node in ["region_suggestion", "place_suggestion"] 
-        or has_string(state.user_input, ["여행지", "어디", "갈만한", "장소", "지역"])
-        or is_negative_confirmation(state)
-    )
-def is_missing_info(state: PlannerState) -> bool:
-    return check_missing_info(state) is not None
-def wants_calendar_registration(state: PlannerState) -> bool:
-    r= False
-    if state.travel_start_date and state.travel_end_date and state.travel_region and state.detail_plan:
-        r= state.is_registering_calendar is True
-    return r
 def wants_export_pdf(state: PlannerState) -> bool:
     export_trigger_phrases = [
         "일정 내보내기",
@@ -587,7 +605,36 @@ def detect_share_intent():
             state.wants_share_plan= False
         return state
     return node
-            
+
+def is_positive_confirmation(state: PlannerState) -> bool:
+    return (
+        state.current_node == "positive" 
+        or has_string(state.user_input, ["네", "응", "좋아", "그래", "할게", "정할게", "좋습니다", "그대로"])
+    )
+def is_negative_confirmation(state: PlannerState) -> bool:
+    return state.current_node == "negative" or has_string(state.user_input, ["아니", "다른", "싫어", "별로"])
+def is_schedule_request(state: PlannerState) -> bool: 
+    if state.current_node != "itinerary_suggestion":
+        return False
+    if not state.travel_region:
+        return False
+    if not state.travel_duration:
+        return False
+    return True
+
+def is_place_request(state: PlannerState) -> bool:
+    return (
+        state.current_node in ["region_suggestion", "place_suggestion"] 
+        or has_string(state.user_input, ["여행지", "어디", "갈만한", "장소", "지역"])
+        or is_negative_confirmation(state)
+    )
+def is_missing_info(state: PlannerState) -> bool:
+    return check_missing_info(state) is not None
+def wants_calendar_registration(state: PlannerState) -> bool:
+    r= False
+    if state.travel_start_date and state.travel_end_date and state.travel_region and state.detail_plan:
+        r= state.is_registering_calendar is True
+    return r
 
 def has_minimum_required_info(state: PlannerState) -> bool:
     return state.travel_region and state.travel_start_date and state.travel_end_date
@@ -632,7 +679,7 @@ def router(state: PlannerState) -> PlannerState:
         return "DeleteCalendar"
     
     if state.current_node == "share_kakao":
-        return "SuperviseInput"  # 또는 별도 ShareKakao 노드를 도입할 수도 있음
+        return "SuperviseInput"
     
     if wants_calendar_registration(state):
         if not state.kakao_token:
