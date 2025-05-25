@@ -13,14 +13,14 @@ from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langchain_cohere import ChatCohere
 from langgraph.graph import StateGraph, END
-from typing import Optional, List
+from typing import Optional, List, Dict
 
-from constants import PLACE_RECOMMEND_PREFER, SEASON_RECOMMEND_PREFER, PLACE_WORD, NEGATIVE_WORD
+from project.kb.app.constants import PLACE_RECOMMEND_PREFER, SEASON_RECOMMEND_PREFER, PLACE_WORD, NEGATIVE_WORD
 # from tool_service import search_place
 from utils.for_llm import get_llm
 from tools.kakao_tool import search_kakao_places
 from tools.web_search_tool import web_search
-from state import PlannerState, InputAnalysis, ShareIntentOutput
+from project.kb.app.state import PlannerState, InputAnalysis, ShareIntentOutput, ScheduleItem, DayPlan, LocationItem
 
 load_dotenv()
 GROQ_API_KEY= os.environ.get("GROQ_API_KEY")
@@ -131,6 +131,13 @@ def get_tools_streaming_response(state: PlannerState, prompt: str, system: Optio
         "chat_history": state.chat_history,
         "intermediate_steps": []
     }
+    print(input_dict)
+    
+    # print(hasattr(tool_calling_llm, "stream"))
+    # print(tools)
+    
+    response= tool_calling_llm.invoke(input_dict)
+    print("response", response)
     
     response_accumulator= ""
     def stream_gen():
@@ -138,6 +145,7 @@ def get_tools_streaming_response(state: PlannerState, prompt: str, system: Optio
         current_text= ""
         for chunk in tool_calling_llm.stream(input_dict):
             if hasattr(chunk, "content"):
+                print("LLM chunk:", chunk)
                 content= chunk.content or ""
                 current_text += content
                 yield content
@@ -355,44 +363,104 @@ def ask_for_missing_info(state: PlannerState) -> PlannerState:
     state.stream_response= get_streaming_response(state, prompt, system)
     return state
 
-def generate_plan(state: PlannerState) -> PlannerState:
-    # plan_prompt= (
-    #     f"Please create a travel itinerary for a trip to {state.travel_region} from {state.travel_start_date} to {state.travel_end_date}, lasting {state.travel_duration}.\n\n"
-    #     "Structure the itinerary day by day, dividing each day into morning and afternoon, and specify exact times for each activity. Include places and activities.\n"
-    #     "The plan should be realistic — account for travel time on the first day and keep the last day light."
+# def generate_plan(state: PlannerState) -> PlannerState:
+#     # plan_prompt= (
+#     #     f"Please create a travel itinerary for a trip to {state.travel_region} from {state.travel_start_date} to {state.travel_end_date}, lasting {state.travel_duration}.\n\n"
+#     #     "Structure the itinerary day by day, dividing each day into morning and afternoon, and specify exact times for each activity. Include places and activities.\n"
+#     #     "The plan should be realistic — account for travel time on the first day and keep the last day light."
 
-    # )
-    plan_prompt = (
-        f"Please create a travel itinerary for a trip to {state.travel_region} "
-        f"from {state.travel_start_date} to {state.travel_end_date}, lasting {state.travel_duration}.\n\n"
-        "Structure the plan day by day, clearly labeling each date (e.g. '2025-08-02') "
-        "and divide each day into '아침' and '오후'.\n"
-        "Each section should list activities with time and description, like:\n"
-        "- 09:00: Activity description\n"
-        "- 13:30: Another activity\n\n"
-        "Format the entire response using **Markdown** with proper indentation.\n"
-        "Do not include any explanations or summaries outside the schedule."
-    )
-    system= SystemMessage(
-        content= (
-            # "너는 여행 일정을 구성하는 여행 플래너야\n"
-            # "일정은 하루 단위로 오전/오후로 구분해서 작성하고, 추천 활동이나 명소를 함께 알려줘.\n"
-            # "응답은 markdown형식으로 하며, 각 날짜를 명확하게 구분해.\n"
-            "You are a travel planner responsible for creating travel schedules."
-            "Each itinerary should be organized by day and divided into morning and afternoon, but when writing it out, specify exact times for each activity.\n"
-            "Include recommended attractions and activities.\n"
-            "Respond in markdown format, and clearly separate each date."
-        )
-    )
-    # system = SystemMessage(
-    #     content=(
-    #         "You are a JSON-only travel itinerary generator.\n"
-    #         "You must output a valid JSON **only**, with no explanation, no markdown, no headers.\n\n"
-    #         "Your response should be a JSON array. Each element in the array should be an object with the date as the key (in YYYY-MM-DD format), and the value should be an object with '오전' and '오후' keys. Each of these keys should have a list of activities with 'time' and 'description'.\n\n"
-    #         "Never explain or describe what you're doing. Your response must be a plain, parsable JSON structure."
-    #     )
-    # )
-    state.stream_response= get_streaming_response(state, plan_prompt, system)
+#     # )
+#     plan_prompt = (
+#         f"Please create a travel itinerary for a trip to {state.travel_region} "
+#         f"from {state.travel_start_date} to {state.travel_end_date}, lasting {state.travel_duration}.\n\n"
+#         "Structure the plan day by day, clearly labeling each date (e.g. '2025-08-02') "
+#         "and divide each day into '아침' and '오후'.\n"
+#         "Each section should list activities with time and description, like:\n"
+#         "- 09:00: Activity description\n"
+#         "- 13:30: Another activity\n\n"
+#         "Format the entire response using **Markdown** with proper indentation.\n"
+#         "Do not include any explanations or summaries outside the schedule."
+#     )
+#     system= SystemMessage(
+#         content= (
+#             # "너는 여행 일정을 구성하는 여행 플래너야\n"
+#             # "일정은 하루 단위로 오전/오후로 구분해서 작성하고, 추천 활동이나 명소를 함께 알려줘.\n"
+#             # "응답은 markdown형식으로 하며, 각 날짜를 명확하게 구분해.\n"
+#             "You are a travel planner responsible for creating travel schedules."
+#             "Each itinerary should be organized by day and divided into morning and afternoon, but when writing it out, specify exact times for each activity.\n"
+#             "Include recommended attractions and activities.\n"
+#             "Respond in markdown format, and clearly separate each date."
+#         )
+#     )
+#     # system = SystemMessage(
+#     #     content=(
+#     #         "You are a JSON-only travel itinerary generator.\n"
+#     #         "You must output a valid JSON **only**, with no explanation, no markdown, no headers.\n\n"
+#     #         "Your response should be a JSON array. Each element in the array should be an object with the date as the key (in YYYY-MM-DD format), and the value should be an object with '오전' and '오후' keys. Each of these keys should have a list of activities with 'time' and 'description'.\n\n"
+#     #         "Never explain or describe what you're doing. Your response must be a plain, parsable JSON structure."
+#     #     )
+#     # )
+#     state.stream_response= get_streaming_response(state, plan_prompt, system)
+#     return state
+def generate_plan(state: PlannerState) -> PlannerState:
+    plan_prompt = f"""
+    {state.travel_region} 지역에 대한 여행 일정을 아래 조건에 맞춰 작성해주세요.
+
+    - 여행 지역: {state.travel_region}
+    - 여행 기간: {state.travel_start_date} ~ {state.travel_end_date} ({state.travel_duration})
+    - 이동 수단: {state.travel_vehicle or '자동차 또는 대중교통'}
+
+    # 요구사항
+    - 일정을 날짜별로 구성해주세요. 각 날짜는 `YYYY-MM-DD` 형식으로 명시하고, '아침', '오전', '오후', '저녁' 시간대로 구분해주세요.
+    - 각 일정 항목은 아래 정보를 포함해야 합니다:
+        - 시간(time)과 활동 설명(description)
+        - 활동 분류(category): activity, restaurant, accommodation, transport 중 하나
+        - 장소 정보(location): title, description, address
+        - 이동 정보(transit): vehicle, vehicle_detail, source → destination, time
+    - 가능한 항목에는 location과 transit 정보를 반드시 포함해주세요.
+    - 음식점(restaurant)은 실제 장소 이름과 주소를 명시해주세요.
+    - 숙소(accommodation)는 각 날짜 마지막 시간대(보통 저녁)에 포함시키고, location 정보를 반드시 포함해주세요.
+    - 출력은 사용자에게 읽기 쉬운 **Markdown 형식**으로 작성해주세요.
+
+    # 출력 예시
+
+    ## 📅 2025-06-01
+    ### 🕗 오전
+    - **09:00** 광안리 해변 산책 _(activity)_
+      - 📍 **광안리 해수욕장** - 부산의 대표 해변  
+        `부산 수영구 광안해변로`
+      - 🚗 자동차 이동
+
+    ### 🍽 점심
+    - **12:00** 광안리에서 점심 식사 _(restaurant)_
+      - 📍 **삼진 어묵** - 전통 어묵 전문점  
+        `부산 중구 보수대로 95`
+      - 🚌 버스 (145번, 15분)  
+        `해운대역 → 광안리역`
+
+    ### 🏨 저녁
+    - **20:00** 숙소 체크인 _(accommodation)_
+      - 📍 **센텀 호텔** - 해운대 근처 4성급 호텔  
+        `부산 해운대구 센텀동로 45`
+      - 🚇 지하철 (부산 1호선, 15분)  
+        `광안리역 → 해운대역`
+
+    위와 같은 **Markdown 형식**으로 전체 일정을 작성해주세요.  
+    다른 설명 없이 마크다운 일정만 출력해주세요.
+    """
+
+    system = SystemMessage(content="""
+    You are a travel planner AI that writes detailed daily travel schedules in Markdown format.
+
+    - Always include each activity's time, description, category.
+    - Include detailed location info (title, description, address).
+    - If transit info exists, write it as vehicle (detail, duration), and show source → destination.
+    - Format clearly using markdown: use headers for date and time parts, bullets for activities.
+    - Do not add any extra explanation before or after the markdown.
+    - Output must be readable and formatted for UI rendering.
+    """)
+
+    state.stream_response = get_streaming_response(state, plan_prompt, system)
     return state
 
 def finalize_plan(state: PlannerState) -> PlannerState:
@@ -426,22 +494,185 @@ def export_plan_to_pdf(state: PlannerState) -> PlannerState:
             print("generated pdf path", state.generated_pdf_path)
     return state
 
+def convert_detail_plan_json_to_text(plan_json: List[Dict[str, Dict[str, List[ScheduleItem]]]]) -> str:
+    parts_order = ["아침", "오전", "오후", "저녁"]
+    lines = []
+
+    for day_entry in plan_json:
+        for date, periods in day_entry.items():
+            lines.append(f"📅 {date}")
+            for part in parts_order:
+                events = periods.get(part, [])
+                if events:
+                    lines.append(f"- [{part}]")
+                    for event in events:
+                        lines.append(f"{event['time']} {event['description']}")
+            lines.append("")  # 날짜 간 구분
+
+    return "\n".join(lines).strip()
+def update_schedule_locations(detail_plan_json: DayPlan, updates: List[Dict]):
+    for update in updates:
+        date = update["date"]
+        part = update["part"]
+        time = update["time"]
+        new_location = update["location"]
+
+        for day_plan in detail_plan_json.plan:
+            if date in day_plan:
+                for item in day_plan[date].get(part, []):
+                    if item.time == time and item.category == "restaurant":
+                        item.location = LocationItem(**new_location)
 def suggest_accommodations(state: PlannerState) -> PlannerState:
     print("suggest accommodations")
-    prompt= f"{state.travel_region} 근처 숙소를 추천해주세요. 일정의 모든 여행지를 10분 이내에 도달할 수 있는지 먼저 찾아보고, 검색되는 숙소가 없을 경우 검색하는 반경을 이동시간 5분씩 늘려가며 검색하세요. 평점 3점 미만인 숙소는 추천하지 마세요."
-    state.stream_response= get_tools_streaming_response(state, prompt)
+    prompt = f"""
+    {state.travel_region} 지역 여행 일정에 따라 숙소를 추천해주세요.
+
+    # 요구사항
+    - 각 일정이 끝난 후 숙소로 10분 이내 이동 가능한 위치의 숙소를 우선 추천하세요.
+    - 추천 가능한 숙소가 없을 경우, 검색 반경을 5분 단위로 늘려주세요.
+    - 평점이 3.0 미만인 숙소는 추천하지 마세요.
+    - 아래 ScheduleItem JSON 형식에 맞게 응답해주세요.
+    - category는 항상 "accommodation"으로 설정하며, location 필드는 반드시 채워야 합니다.
+
+    # 출력 예시
+    ```json
+    [
+    {{
+        "2025-06-01": {{
+        "저녁": [
+            {{
+            "time": "20:00",
+            "description": "숙소 체크인",
+            "category": "accommodation",
+            "source": "Kakao Local",
+            "location": {{
+                "title": "부산 센텀호텔",
+                "description": "광안리에서 10분 거리의 4성급 호텔",
+                "address": "부산광역시 해운대구 센텀동로 45"
+            }}
+            }}
+        ]
+        }}
+    }}
+    ]
+    
+    # 일정 내용
+    {convert_detail_plan_json_to_text(state.detail_plan_json.plan)}
+    """
+    system = SystemMessage(content="""
+    You are a travel assistant who suggests public transport or vehicle-based transit between scheduled travel items.
+    Always respond in valid JSON matching the ScheduleItem schema.
+    Avoid natural language explanations and markdown.
+    """)
+    # state.stream_response= get_tools_streaming_response(state, prompt, system)
+    state.stream_response= get_streaming_response(state, prompt, system)
     return state
 def suggest_restaurants(state: PlannerState) -> PlannerState:
     print("suggest restaurants")
-    prompt= f"{state.travel_region} 근처의 맛집을 일정에 따라 찾아주세요. 각 일정으로부터 이동했을 경우를 고려하여 이동시간 최소 5분이 걸리는 거리 내의 음식점부터 검색하며, 검색되는 음식점이 없을 경우, 검색하는 반경을 이동시간 5분씩 늘려가며 검색하세요. 평점 4점 이상인 음식점만 추천해주세요"
-    state.stream_response= get_tools_streaming_response(state, prompt)
+    prompt = f"""
+    다음 여행 일정의 음식점 추천이 필요한 부분을 보완해주세요.
+
+    # 규칙
+    - 이미 존재하는 일정은 수정하지 마세요.
+    - 아래 일정 중 category가 'restaurant'인데 location 정보가 없는 항목을 찾아서, 해당 항목의 location 정보를 JSON으로 추가해주세요.
+    - output은 기존 일정 전체가 아니라, 업데이트할 항목만 포함하는 JSON 리스트여야 합니다.
+    - 각 항목은 날짜(date), 시간대(part), 시작시간(time), location 정보로 구성됩니다.
+
+    # 응답 예시
+    [
+    {{
+        "date": "2025-06-01",
+        "part": "점심",
+        "time": "12:30",
+        "location": {{
+        "title": "부산 삼진 어묵",
+        "description": "부산의 전통적인 어묵 전문점",
+        "address": "부산광역시 중구 보수대로 95"
+        }}
+    }},
+    ...
+    ]
+
+    # 일정 내용
+    {convert_detail_plan_json_to_text(state.detail_plan_json.plan)}
+    """
+    system = SystemMessage(content="""
+    You are a travel assistant who suggests public transport or vehicle-based transit between scheduled travel items.
+    Always respond in valid JSON matching the ScheduleItem schema.
+    Avoid natural language explanations and markdown.
+    """)
+    # state.stream_response= get_tools_streaming_response(state, prompt, system)
+    state.stream_response= get_streaming_response(state, prompt, system)
     return state
 def suggest_transit(state: PlannerState) -> PlannerState:
     print("suggest transit")
     if state.travel_vehicle in ["도보", "대중교통", "기차", "버스", "지하철", "전철", "트램", "걸어서", "차없이", "차 없이"]:
-        prompt= f"{state.travel_region}을 여행하는 일정에 따라 여행지, 다음 목적지, 혹은 숙소로 이동할 때 이용할 이동 교통편을 구체적으로 알려주세요. 도보일 경우 도보 몇 분인지, 버스를 타야할 경우 어떤 버스를 어떤 정류장에서 타서 어떤 정류장에서 내려야하는지, 여러 교통편을 섞어서 이용할 경우 어떻게 이동하다가 어떤 교통편으로 어떻게 갈아타는지 등 이동 교통편에 대한 정보를 상세히 알려주세요."
+        prompt = f"""
+        {state.travel_region} 여행 일정에 따라 장소 간의 이동 교통편을 추천해주세요.
+
+        # 요구사항
+        - 각 일정의 이동 경로마다 ScheduleItem 내 transit 필드를 정확히 채워주세요.
+        - transit은 문자열("자동차") 또는 복수 이동 수단의 리스트로 표현됩니다.
+        - 대중교통일 경우, 어떤 교통수단을 어디서 타고 어디서 갈아타고 어디서 내리는지 구체적으로 기술하세요.
+        - 가능한 경우 transit.time, vehicle, source, destination 필드를 모두 채워주세요.
+
+        # 출력 예시 (자동차 이동)
+        [
+            {{
+                "2025-06-01": {{
+                    "오전": [
+                        {{
+                            "time": "10:30",
+                            "description": "해운대에서 광안리로 이동",
+                            "category": "other",
+                            "transit": {{
+                                "vehicle": "자동차",
+                                "vehicle_detail": null,
+                                "time": null,
+                                "source": null,
+                                "destination": null
+                            }}
+                        }}
+                    ]
+                }}
+            }}
+        ]
+        출력 예시 (대중교통 경로)
+        json
+        [
+            {{
+                "2025-06-01": {{
+                    "오전": [
+                        {{
+                            "time": "10:30",
+                            "description": "해운대에서 광안리로 이동",
+                            "category": "other",
+                            "transit": [
+                                {{
+                                    "vehicle": "버스",
+                                    "vehicle_detail": "139번",
+                                    "time": "15분",
+                                    "source": "해운대역",
+                                    "destination": "광안리해변"
+                                }}
+                            ]
+                        }}
+                    ]
+                }}
+            }}
+        ]
+        
+        # 일정 내용
+        {convert_detail_plan_json_to_text(state.detail_plan_json.plan)}
+        """
         # state.stream_response= get_streaming_response(state, prompt)
-        state.stream_response= get_tools_streaming_response(state, prompt)
+        system = SystemMessage(content="""
+        You are a travel assistant who suggests public transport or vehicle-based transit between scheduled travel items.
+        Always respond in valid JSON matching the ScheduleItem schema.
+        Avoid natural language explanations and markdown.
+        """)
+        # state.stream_response= get_tools_streaming_response(state, prompt, system)
+        state.stream_response= get_streaming_response(state, prompt, system)
     return state
 
 def share_via_kakao(state:PlannerState) -> PlannerState:
@@ -472,7 +703,9 @@ def is_place_request(state: PlannerState) -> bool:
 def is_missing_info(state: PlannerState) -> bool:
     return check_missing_info(state) is not None
 def wants_calendar_registration(state: PlannerState) -> bool:
-    r= state.is_registering_calendar is True
+    r= False
+    if state.travel_start_date and state.travel_end_date and state.travel_region and state.detail_plan:
+        r= state.is_registering_calendar is True
     print("일정 등록하기", r)
     return r
 def wants_export_pdf(state: PlannerState) -> bool:
@@ -559,27 +792,28 @@ def kakao_login(state: PlannerState)->bool:
     return state
 
 def router(state: PlannerState) -> PlannerState:
-    if not has_minimum_required_info(state):
-        return "SuperviseInput"
-    if wants_export_pdf(state):
-        return "ExportPDF"
-    if state.current_node in [
-        "accommodation_suggestion",
-        "restaurant_suggestion",
-        "transit_suggestion",
-        "itinerary_suggestion"
-    ]:
-        if wants_accommodation_suggestion(state):
-            return "SuggestAccommodations"
-        if wants_restaurant_suggestion(state):
-            return "SuggestRestaurants"
-        if wants_transit_suggestion(state):
-            return "SuggestTransit"
     if wants_calendar_registration(state):
         if not state.kakao_token:
             return "KakaoLogin"
         else:
             return "RegisterCalendar"
+    if not has_minimum_required_info(state):
+        return "SuperviseInput"
+    if wants_export_pdf(state):
+        return "ExportPDF"
+    # if state.current_node in [
+    #     "accommodation_suggestion",
+    #     "restaurant_suggestion",
+    #     "transit_suggestion",
+    #     "itinerary_suggestion"
+    # ]:
+    #     if wants_accommodation_suggestion(state):
+    #         return "SuggestAccommodations"
+    #     if wants_restaurant_suggestion(state):
+    #         return "SuggestRestaurants"
+    #     if wants_transit_suggestion(state):
+    #         return "SuggestTransit"
+    
     if is_positive_confirmation(state):
         return "FinalizePlan"
     if is_schedule_request(state):
@@ -593,9 +827,9 @@ def build_flexible_planner_graph():
     builder.add_node("AnalyzeInput", analyze_input)
     builder.add_node("RecommendPlaces", recommend_places)
     builder.add_node("GeneratePlan", generate_plan)
-    builder.add_node("SuggestAccommodations", suggest_accommodations)
-    builder.add_node("SuggestRestaurants", suggest_restaurants)
-    builder.add_node("SuggestTransit", suggest_transit)
+    # builder.add_node("SuggestAccommodations", suggest_accommodations)
+    # builder.add_node("SuggestRestaurants", suggest_restaurants)
+    # builder.add_node("SuggestTransit", suggest_transit)
     builder.add_node("FinalizePlan", finalize_plan)
     builder.add_node("RegisterCalendar", register_calendar)
     builder.add_node("ExportPDF", export_plan_to_pdf)
@@ -609,9 +843,9 @@ def build_flexible_planner_graph():
         {
             "SuperviseInput": "SuperviseInput",
             "RecommendPlaces": "RecommendPlaces",
-            "SuggestAccommodations": "SuggestAccommodations",
-            "SuggestRestaurants": "SuggestRestaurants",
-            "SuggestTransit": "SuggestTransit",
+            # "SuggestAccommodations": "SuggestAccommodations",
+            # "SuggestRestaurants": "SuggestRestaurants",
+            # "SuggestTransit": "SuggestTransit",
             "GeneratePlan": "GeneratePlan",
             "FinalizePlan": "FinalizePlan",
             "ExportPDF": "ExportPDF",
@@ -628,9 +862,9 @@ def build_flexible_planner_graph():
     builder.add_edge("SuperviseInput", END)
     builder.add_edge("RecommendPlaces", END)
     builder.add_edge("GeneratePlan", END)
-    builder.add_edge("SuggestAccommodations", END)
-    builder.add_edge("SuggestRestaurants", END)
-    builder.add_edge("SuggestTransit", END)
+    # builder.add_edge("SuggestAccommodations", END)
+    # builder.add_edge("SuggestRestaurants", END)
+    # builder.add_edge("SuggestTransit", END)
     builder.add_edge("RegisterCalendar", END)
     builder.add_edge("ExportPDF", END)
     builder.add_edge("KakaoLogin", END)

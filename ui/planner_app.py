@@ -12,6 +12,7 @@ import requests
 from requests_oauthlib import OAuth2Session
 from streamlit_server_state import server_state, server_state_lock
 from typing import List, Dict
+from pydantic import BaseModel
 
 from langchain_groq import ChatGroq
 from langchain_cohere import ChatCohere
@@ -22,11 +23,11 @@ from langgraph.graph import StateGraph, END
 import pytz
 
 from utils.for_llm import get_llm
-from state import PlannerState, DayPlan
-from flow import build_flexible_planner_graph
+from project.kb.app.state import PlannerState, DayPlan, ScheduleItem, LocationItem, TransitItem
+from project.kb.app.flow import build_flexible_planner_graph
 from tools.kakao_tool import get_schedule_list, register_schedule, update_schedule, delete_schedule, get_friends_list, send_kakao_message
-from error import CalendarServiceError, SharingServiceError
-from session import get_session_id, get_temp_key
+from project.kb.utils.error import CalendarServiceError, SharingServiceError
+from project.kb.app.session import get_session_id, get_temp_key
 
 load_dotenv()
 GROQ_API_KEY= os.environ.get("GROQ_API_KEY")
@@ -72,6 +73,36 @@ def get_streaming_response(llm, state: PlannerState, prompt: str, system: System
             state.chat_history.append(AIMessage(content= response_accumulator))
     return stream_gen()
 
+def convert_dayplan_models_to_dict(result):
+    converted = []
+    for day in result:
+        if isinstance(day, tuple):  # 👈 tuple이면 첫 번째 요소로 꺼냄
+            day = day[0]
+        day_dict = {}
+        for date, schedule in day.items():
+            schedule_dict = {}
+            for period, items in schedule.items():
+                converted_items = [
+                    item.model_dump() if isinstance(item, BaseModel) else item for item in items
+                ]
+                schedule_dict[period] = converted_items
+            day_dict[date] = schedule_dict
+        converted.append(day_dict)
+    return converted
+
+def dayplan_serialize(obj):
+    if isinstance(obj, list):
+        return [dayplan_serialize(o) for o in obj]
+    elif hasattr(obj, '__dict__'):
+        return {
+            k: dayplan_serialize(v) for k, v in vars(obj).items()
+        }
+    elif isinstance(obj, dict):
+        return {k: dayplan_serialize(v) for k, v in obj.items()}
+    else:
+        return obj
+        
+
 def parse_markdown_to_json(llm):
     llm_for_parser= get_llm(
         platform= "groq", 
@@ -84,7 +115,7 @@ def parse_markdown_to_json(llm):
     prompt= PromptTemplate.from_template("""
     You are given a travel itinerary in Korean markdown format.
 
-    Your task is to convert this into a **pure JSON list** following the strict format below.
+    Your task is to convert it into a **pure JSON list** following the strict schema below.
 
     # Input:
     {plan}
@@ -92,52 +123,111 @@ def parse_markdown_to_json(llm):
     # Output Instructions:
     - The output must be a **JSON list only**.
     - **DO NOT** include any explanation, markdown, headings, or code block.
-    - **DO NOT** add any comments, formatting, or extra text.
-    - Output only JSON.
+    - Output **must be valid JSON**, without any extra text.
 
-    # Format Rules (must follow strictly):
-    1. The output must be a **list of JSON objects**, each with a key of a date (e.g. `"2025-06-01"`).
-    2. Each date must contain the exact keys in this order: `"아침"`, `"오전"`, `"오후"`, `"저녁"`.
-    3. These time periods must always be present — even if empty.
-    4. Each time period must be a list of schedule items. If none, use an empty list.
-    5. Each schedule item must have:
-        - `"time"`: string, formatted as `"HH:MM"`
-        - `"description"`: string, the activity content
-    6. **No keys may be missing.** All 4 time periods must be present.
-    7. The final output must be strictly valid JSON (RFC 8259).
-    8. **Do not wrap in markdown or code fences**.
-
-    # Example Output:
+    # JSON Schema Rules (Strict):
+    - Output is a list of objects, each with a date key (e.g., "2025-06-01").
+    - Each value is an object with **exactly** these four keys:
+    - "아침", "오전", "오후", "저녁"
+    - Each key maps to a list of `ScheduleItem`s.
+    - Each `ScheduleItem` must contain:
+    - "time": (string, format "HH:MM")
+    - "description": (string)
+    - "category": one of "activity", "restaurant", "accommodation", or "other"
+    - "source": (optional string, if known)
+    - "location": (optional object) with:
+        - "title": (optional string)
+        - "description": (optional string)
+        - "address": (optional string)
+    - "transit": (optional)
+        - always a **list**
+        - each item must be an object with:
+            - "vehicle": (string, e.g., "자동차", "버스", "도보", "지하철")
+            - "vehicle_detail": (optional string, e.g., "렌터카", "101번 버스")
+            - "time": (optional string, e.g., "15분")
+            - "source": (optional string, e.g., "제주 공항")
+            - "destination": (optional string, e.g., "성산 일출봉")
+    - The `transit` field **must always be a list**, even if there's only one or no transit.
+    - Never use string or single object for `transit`.
+    
+    # Format Example:
     [
-        {{
-            "2025-06-01": {{
-                "아침": [
-                    {{
-                        "time": "08:00",
-                        "description": "호텔 조식"
-                    }}
-                ],
-                "오전": [],
-                "오후": [
-                    {{
-                        "time": "14:00",
-                        "description": "박물관 관람"
-                    }}
-                ],
-                "저녁": []
+    {{
+        "2025-06-01": {{
+        "아침": [
+            {{
+            "time": "08:00",
+            "description": "호텔 조식",
+            "category": "restaurant",
+            "source": "LLM",
+            "location": {{
+                "title": "조식 뷔페",
+                "description": "호텔 내 1층",
+                "address": "부산 해운대구 ..."
+            }},
+            "transit": [
+                {{
+                    "vehicle": "지하철",
+                    "vehicle_detail": "부산 1호선",
+                    "time": "15분",
+                    "source": "해운대역",
+                    "destination": "광안리역"
+                }}
+            ]
             }}
+        ],
+        "오전": [],
+        "오후": [],
+        "저녁": []
         }}
+    }}
     ]
     """).partial(format_instructions= parser.get_format_instructions())
     
     chain= prompt | llm | parser
     result= chain.invoke({ "plan" : st.session_state.planner_state.detail_plan })
     print("parse markdown to json result", result)
+    # result_as_dict = [ 
+    #     { date: { 
+    #         time: [item.model_dump() if isinstance(item, BaseModel) else item for item in items] 
+    #         for time, items in day_info.items() 
+    #     }} 
+    #     for day in result 
+    #     for date, day_info in day.items() 
+    # ]
+    # st.session_state.planner_state.detail_plan_json= DayPlan(plan= result).model_dump()
+    # st.session_state.planner_state.detail_plan_json= { "plan": result_as_dict }
+    # converted_result= convert_dayplan_models_to_dict(result)
+    # converted_result= dayplan_serialize(result)
+    # st.session_state.planner_state.detail_plan_json= { "plan": converted_result }
     st.session_state.planner_state.detail_plan_json= result
 
-def convert_detail_plan_json_to_text(plan_json: List[Dict[str, Dict[str, List[Dict]]]]) -> str:
+# def convert_detail_plan_json_to_text(plan_json: List[Dict[str, Dict[str, List[Dict]]]]) -> str:
+def convert_detail_plan_json_to_text(plan_json: List[Dict[str, Dict[str, List[ScheduleItem]]]]) -> str:
     parts_order = ["아침", "오전", "오후", "저녁"]
     lines = []
+    
+    vehicle_icons = {
+        "버스": "🚌",
+        "지하철": "🚇",
+        "택시": "🚗",
+        "자동차": "🚗",
+        "도보": "🚶",
+        "기차": "🚆",
+        "트램": "🚋",
+        "기타": "🚙"
+    }
+    
+    vehicle_icons = {
+        "버스": "[🚌 버스]",
+        "지하철": "[🚇 지하철]",
+        "택시": "[🚗 택시]",
+        "자동차": "[🚗 자동차]",
+        "도보": "[🚶 도보]",
+        "기차": "[🚆 기차]",
+        "트램": "[🚋 트램]",
+        "기타": "[🚙 이동]"
+    }
 
     for day_entry in plan_json:
         for date, periods in day_entry.items():
@@ -145,12 +235,46 @@ def convert_detail_plan_json_to_text(plan_json: List[Dict[str, Dict[str, List[Di
             for part in parts_order:
                 events = periods.get(part, [])
                 if events:
-                    lines.append(f"- [{part}]")
+                    lines.append(f"  - [{part}]")
                     for event in events:
-                        lines.append(f"{event['time']} {event['description']}")
-            lines.append("")  # 날짜 간 구분
+                        # 시간 및 설명
+                        line = f"    {event.time} {event.description}"
+                        if event.category:
+                            line += f" ({event.category})"
+                        lines.append(line)
 
-    return "\n".join(lines).strip()
+                        # 장소 정보
+                        if event.location:
+                            loc = event.location
+                            if loc.title:
+                                lines.append(f"      장소: {loc.title}")
+                            if loc.description:
+                                lines.append(f"        설명: {loc.description}")
+                            if loc.address:
+                                lines.append(f"        주소: {loc.address}")
+
+                        # 이동수단 정보
+                        if event.transit:
+                            if isinstance(event.transit, list):
+                                for t in event.transit:
+                                    icon = vehicle_icons.get(t.vehicle, "[🚙 이동]")
+                                    transit_info = f"      {icon}"
+                                    if t.vehicle_detail:
+                                        transit_info += f" {t.vehicle_detail}"
+                                    if t.time:
+                                        transit_info += f" / 소요시간: {t.time}"
+                                    lines.append(transit_info)
+                                    if t.source and t.destination:
+                                        lines.append(f"        경로: {t.source} → {t.destination}")
+                            elif isinstance(event.transit, str):
+                                icon = vehicle_icons.get(event.transit, "[🚙 이동]")
+                                lines.append(f"      {icon} {event.transit}")
+                    lines.append("")  # 일정 간 구분
+    res= "\n".join(lines).strip()
+    print()
+    print("res ", res)
+    print()
+    return res
 def split_text_by_length(text: str, max_length: int= 1000) -> List[str]:
     lines= text.strip().split("\n")
     chunks= []
@@ -191,24 +315,27 @@ def handle_schedule_registration(container):
     if existing_event_items:
         container.info("여행가려는 기간에 이미 등록되어있는 일정이 있습니다.")
         
-        event_keys= [{event['id']} for event in existing_event_items]
-        select_all= container.checkbox("전체 선택", key="select_all")
+        event_keys= [event['id'] for event in existing_event_items]
+        # select_all= container.checkbox("전체 선택", key="select_all")
         
         selected_to_delete= set()
-        if select_all:
-            for key in event_keys:
-                if key not in st.session_state or not st.session_state[key]:
-                    st.session_state[key]= True
-        else:
-            for key in event_keys:
-                if key not in st.session_state or not st.session_state[key]:
-                    st.session_state[key]= False
+        # if select_all:
+        #     for key in event_keys:
+        #         if key not in st.session_state or not st.session_state[key]:
+        #             st.session_state[key]= True
+        # else:
+        #     for key in event_keys:
+        #         if key not in st.session_state or not st.session_state[key]:
+        #             st.session_state[key]= False
+        # for key in event_keys:
+        #     if key not in st.session_state or not st.session_state[key]:
+        #         st.session_state[key]= select_all
             # if any(st.session_state.get(k, False) for k in event_keys):
             #     if st.session_state.get("force_reset", False):
             #         for key in event_keys:
             #             st.session_state[key]= False
             #         st.session_state["force_reset"]= False
-        all_checked= True
+        # all_checked= True
         for event in existing_event_items:
             # start_utc= datetime.fromisoformat(event["time"]["start_at"].replace("Z", "+00:00"))
             # end_utc= datetime.fromisoformat(event["time"]["end_at"].replace("Z", "+00:00"))
@@ -237,19 +364,33 @@ def handle_schedule_registration(container):
                 print("selected to delete false", selected_to_delete)
                 # all_checked= False
                 
-        all_selected= all(
-            all(
-                st.session_state.get(event_id, False) for event_id in event_keys
-            )
-        )
-        if all_selected and not select_all:
-            st.session_state.select_all= True
-        elif not all_selected and select_all:
-            st.session_state.select_all= False
+        # all_selected = all(st.session_state.get(f"existing_event_{event_id}", False) for event_id in event_keys)
+
+        # if all_selected and not select_all:
+        #     st.session_state.select_all= True
+        # elif not all_selected and select_all:
+        #     st.session_state.select_all= False
         # if all_checked and not st.session_state.get("select_all", False):
         #     st.session_state["select_all"]= True
         # elif not all_checked and st.session_state.get("select_all", False):
         #     st.session_state["select_all"]= False
+        if container.button("전체 삭제 후 등록", key="remove_all_and_register"):
+            try:
+                for event_id in event_keys:
+                    delete_schedule(access_token, event_id)
+                reg_res = register_schedule(access_token, state.detail_plan_json.plan)
+                container.success("등록되어있던 모든 일정을 삭제하고, 여행 일정을 새로 등록했습니다.")
+                return 
+            except CalendarServiceError as e:
+                container.error(str(e))
+        if container.button("전체 삭제", key="remove_all"):
+            try:
+                for event_id in event_keys:
+                    delete_schedule(access_token, event_id)
+                container.success("등록되어있던 모든 일정을 삭제했습니다.")
+                return 
+            except CalendarServiceError as e:
+                container.error(str(e))
         if container.button("선택한 일정 삭제", key="remove_existing_event"):
             if len(selected_to_delete) == 0:
                 st.toast("일정을 먼저 선택해주세요.")
@@ -268,7 +409,7 @@ def handle_schedule_registration(container):
                 try:
                     for event_id in selected_to_delete:
                         delete_schedule(access_token, event_id)
-                    reg_res = register_schedule(access_token, state.detail_plan_json.model_dump())
+                    reg_res = register_schedule(access_token, state.detail_plan_json.plan)
                     container.success("선택하신 일정을 삭제하고 새 일정을 등록했습니다.")
                     state.is_registering_calendar= False
                     return 
@@ -276,7 +417,7 @@ def handle_schedule_registration(container):
                     container.error(str(e))
         if container.button("등록된 일정 무시하고 일정 등록", key="continue_register"):
             try:
-                reg_res = register_schedule(access_token, state.detail_plan_json.model_dump())
+                reg_res = register_schedule(access_token, state.detail_plan_json.plan)
                 container.success("새 일정을 톡캘린더에 등록했습니다.")
                 state.is_registering_calendar= False
             except CalendarServiceError as e:
@@ -285,7 +426,7 @@ def handle_schedule_registration(container):
         container.info("여행가려는 기간에 등록된 일정이 없네요! 일정을 바로 등록할까요?")
         if container.button("톡캘린더에 일정 등록하기", key="calendar_submit"):
             try:
-                reg_res = register_schedule(access_token, state.detail_plan_json.model_dump())
+                reg_res = register_schedule(access_token, state.detail_plan_json.plan)
                 container.success("톡캘린더에 일정을 등록했습니다.")
                 state.is_registering_calendar = False
             except CalendarServiceError as e:
@@ -313,7 +454,7 @@ def share_schedule(container):
     # print(json.dumps(friends), sort_keys= True, indent= 4)
     print(friends)
     
-    text_messages= convert_detail_plan_json_to_text(st.session_state.planner_state.detail_plan_json.model_dump())
+    text_messages= convert_detail_plan_json_to_text(st.session_state.planner_state.detail_plan_json.plan)
     print("text messages", text_messages)
     splitted_text= split_text_by_length(text_messages)
     print("splitted", splitted_text)
@@ -412,8 +553,20 @@ def run_chatbot_ui(temp_key: str):
                     if st.button("카카오 로그인", key="kakao_login_button"):
                         st.markdown(f"""<meta http-equiv="refresh" content="0; url={build_kakao_auth_url()}" />""", unsafe_allow_html=True)
                 else:
-                    if st.button("카카오톡으로 일정 공유", key="share_plan_in_history"):
+                    unique_key = f"share_plan_{id(msg)}"
+                    if st.button("카카오톡으로 일정 공유", key=unique_key):
                         share_schedule(chat_history_container)
+            elif isinstance(msg, tuple) and msg[0] == "download":
+                st.write(f"🙋 사용자: {user_prompt}")
+                with open(st.session_state.planner_state.generated_pdf_path, "rb") as f:
+                    pdf_bytes= f.read()
+                    st.download_button(
+                        label= "여행 일정을 PDF로 다운로드",
+                        data= pdf_bytes,
+                        file_name= "travel_plan.pdf",
+                        mime= "application/pdf",
+                        key="download_button_in_history"
+                    )
     if st.session_state.planner_state.is_registering_calendar:
         with calendar_container:
             if "kakao_token" in st.session_state and st.session_state.kakao_token:
@@ -429,11 +582,16 @@ def run_chatbot_ui(temp_key: str):
         state.user_input= user_prompt
         state.chat_history.append(HumanMessage(content=user_prompt))
         
-        print(type(st.session_state.planner_state.detail_plan_json))
-        print(type(st.session_state.planner_state.detail_plan_json.root[0]))
+        # print(type(st.session_state.planner_state.detail_plan_json))
+        # print(type(st.session_state.planner_state.detail_plan_json))
+        # print(type(st.session_state.planner_state.detail_plan_json.root[0]))
+        
+        
 
         
         graph= build_flexible_planner_graph()
+        if state.detail_plan_json is not None:
+            assert isinstance(state.detail_plan_json, DayPlan), "detail_plan_json must be DayPlan"
         res_dict= graph.invoke(state)
         
         for key, value in res_dict.items():
@@ -462,7 +620,8 @@ def run_chatbot_ui(temp_key: str):
                     
                     if state.current_node == "itinerary_suggestion":
                         state.detail_plan= content
-                        parse_markdown_to_json(llm)
+                        if state.travel_start_date and state.travel_end_date and state.travel_region:
+                            parse_markdown_to_json(llm)
         
             
         if state.current_node == "registration_request":

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, RootModel
-from typing import List, Optional, Generator, Dict, Literal, Union
+from typing import Any, List, Optional, Generator, Dict, Literal, Union, Tuple
 from langchain.schema import BaseMessage
 
 class LocationItem(BaseModel):
@@ -7,7 +7,7 @@ class LocationItem(BaseModel):
     description: Optional[str]= None
     address: Optional[str]= None
 class TransitItem(BaseModel):
-    vehicle: Optional[str]= None
+    vehicle: str
     vehicle_detail: Optional[str]= None
     time: Optional[str]= None
     source: Optional[str]= None
@@ -15,13 +15,13 @@ class TransitItem(BaseModel):
 class ScheduleItem(BaseModel):
     time: str
     description: str
-    category: Optional[Literal["activity", "restaurant", "accommodation", "transport"]] = "activity"
+    category: Optional[Literal["activity", "restaurant", "accommodation", "transport", "other"]] = "activity"
     source: Optional[str]= None
     location: Optional[LocationItem]= None
-    transit: Optional[Union[str, List[TransitItem]]]= None
+    transit: Optional[List[TransitItem]]= None
 
-class DayPlan(RootModel):
-    root: List[Dict[str, Dict[str, List[ScheduleItem]]]]
+class DayPlan(BaseModel):
+    plan: List[Dict[str, Dict[str, List[ScheduleItem]]]]
 
 class InputAnalysis(BaseModel):
     travel_region: Optional[str]= None
@@ -46,9 +46,10 @@ class PlannerState(BaseModel):
     user_profile: Optional[str]= None
     detail_plan: Optional[str]= None
     detail_plan_json: Optional[DayPlan]= None
+    # detail_plan_json: Optional[Dict[str, Any]]= Field(default= None)
     last_plan_summary: Optional[str]= None
     stream_response: Optional[Generator[str, None, None]]= None
-    chat_history: List[BaseMessage]= Field(default_factory= list)
+    chat_history: List[Union[BaseMessage, Tuple]]= Field(default_factory= list)
     is_confirming_plan: bool= False
     is_registering_calendar: bool= False
     is_login_kakao: bool= False

@@ -17,8 +17,8 @@ from langchain.schema import HumanMessage, SystemMessage, AIMessage
 from langgraph.graph import StateGraph, END
 import pytz
 
-from state import PlannerState, DayPlan
-from flow import build_flexible_planner_graph
+from project.kb.app.state import PlannerState, DayPlan
+from project.kb.app.flow import build_flexible_planner_graph
 from tools.kakao_tool import get_calendar_schedule_list, register_schedule, update_chedule, delete_schedule
 
 load_dotenv()
@@ -236,7 +236,7 @@ def register_event(
 
 def handle_calendar_registration_flow():
     from api_util import build_structured_plan, get_calendar_service, get_event_list, create_calendar_event, update_calendar_event, delete_calendar_event
-    from error import CalendarServiceError
+    from project.kb.utils.error import CalendarServiceError
     
     state= st.session_state.planner_state
     if not (state.travel_start_date and state.travel_end_date):

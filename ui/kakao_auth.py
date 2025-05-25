@@ -6,7 +6,7 @@ import urllib.parse
 import requests
 from streamlit_server_state import server_state, server_state_lock
 
-from state import PlannerState
+from project.kb.app.state import PlannerState
 
 load_dotenv()
 
