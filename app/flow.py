@@ -1,6 +1,7 @@
 import traceback
 from datetime import datetime
 
+import json
 import re
 
 from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
@@ -11,7 +12,7 @@ from typing import Optional, List, Dict
 
 from app.constants import PLACE_RECOMMEND_PREFER, SEASON_RECOMMEND_PREFER, PLACE_WORD, NEGATIVE_WORD
 from utils.for_llm import get_llm
-from app.state import PlannerState, InputAnalysis, ShareIntentOutput, ScheduleItem, DayPlan, LocationItem
+from app.state import PlannerState, InputAnalysis, ShareIntentOutput, ScheduleItem, DayPlan, LocationItem, ScheduleModifyRequest, ScheduleModifyRequestItem, CalendarEvent
 from utils.decorators import safe_node
 
 GUARDRAIL_MESSAGE = SystemMessage(content="""
@@ -123,7 +124,7 @@ def analyze_input(state: PlannerState) -> PlannerState:
             "travel_end_date": "<YYYY-MM-DD format>",
             "travel_duration": "<Trip duration (e.g., 1 night 2 days, 2 nights 3 days, 4 days)>",
             "travel_vehicle": "<대중교통 / 자동차>",
-            "action_type": "<region_suggestion / place_suggestion / itinerary_suggestion / restaurant_suggestion / accommodation_suggestion / transit_suggestion / registration_request / modification_request / share_kakao (user wants to share itinerary via KakaoTalk) / unclear / positive / negative>"
+            "action_type": "<region_suggestion / place_suggestion / itinerary_suggestion / restaurant_suggestion / accommodation_suggestion / transit_suggestion / registration_request / update_request / delete_request / modification_request / share_kakao (user wants to share itinerary via KakaoTalk) / unclear / positive / negative>"
         }}
 
         Example 1:
@@ -168,6 +169,20 @@ def analyze_input(state: PlannerState) -> PlannerState:
             "travel_vehicle": "대중교통",
             "action_type": "region_suggestion"
         }}
+        
+        Example 4:
+        Input: "이 일정을 캘린더에 등록해줘"
+        Output:
+        {{
+            "travel_region": null,
+            "travel_places": [],
+            "travel_season_or_month": null,
+            "travel_start_date": null,
+            "travel_end_date": null,
+            "travel_duration": null,
+            "travel_vehicle": null,
+            "action_type": "registration_request"
+        }}
         """
     )
     
@@ -195,6 +210,12 @@ def analyze_input(state: PlannerState) -> PlannerState:
         state.travel_vehicle= result.travel_vehicle or state.travel_vehicle
         state.previous_node= state.current_node
         state.current_node= result.action_type
+        if state.current_node == "registration_request":
+            state.schedule_modify= "register"
+        elif state.current_node == "update_request":
+            state.schedule_modify= "update"
+        elif state.current_node == "delete_request":
+            state.schedule_modify= "delete"
     except Exception as e:
         traceback.print_exc()
         print(f"[ERROR] Failed to parse input: {e}")
@@ -343,8 +364,116 @@ def finalize_plan(state: PlannerState) -> PlannerState:
     return state
 
 def register_calendar(state: PlannerState) -> PlannerState:
-    confirm= "계획이 확정되었습니다. 캘린더에 등록하시겠어요?"
-    state.stream_response= get_streaming_response(state, confirm)
+    print("register calendar")
+    confirm= "계획이 확정되었습니다. 캘린더에 등록할게요"
+    # state.stream_response= get_streaming_response(state, confirm)
+    state.stream_response= None
+    state.other_response= confirm
+    return state
+def update_calendar(state: PlannerState) -> PlannerState:
+    registered_json = json.dumps(
+        [event.model_dump() if hasattr(event, "model_dump") else event for event in state.registered_events],
+        ensure_ascii=False
+    )
+    
+    prompt = PromptTemplate.from_template("""
+    The user wants to update a scheduled calendar event.
+
+    Current registered schedules (JSON):
+    {registered_events}
+
+    User input:
+    "{user_input}"
+
+    Based on the above list and the user's intent, find the single most relevant event to update.
+    Extract the modification information in the following format:
+
+    [
+        {{
+            "event_id": "original_event_id",
+            "title": "수정할 새로운 제목 또는 null",
+            "description": "수정할 새로운 설명 또는 null",
+            "time": {
+                "start_at": "수정할 새로운 start_at 또는 null",
+                "end_at": "수정할 새로운 end_at 또는 null"
+            }
+        }},
+        ...
+    ]
+
+    - Only include the event_id if it clearly matches from the list above.
+    - new_title and new_description must be null if not specified in user input.
+    - Do not include any explanation or additional text.
+    """)
+    
+    parser = PydanticOutputParser(pydantic_object=ScheduleModifyRequest)
+    chain = prompt | llm_for_parser | OutputFixingParser.from_llm(parser=parser, llm=llm_for_parser)
+    
+    try:
+        result = chain.invoke({
+            "user_input": state.user_input,
+            "registered_events": registered_json
+        })
+
+        # result.event_id는 이제 LLM이 추출한 event_id
+        state.schedule_for_modify = [
+            CalendarEvent(
+                event_id=result.event_id,
+                title=result.new_title or "",  # fallback
+                description=result.new_description or "",
+                time={}  # 시간 수정 안할 거면 생략해도 됨
+            )
+        ]
+        state.schedule_modify= "delete"
+    except Exception as e:
+        print("[update_calendar] error", e)
+    return state
+def delete_calendar(state: PlannerState) -> PlannerState:
+    registered_json = json.dumps(
+        [event.model_dump() if hasattr(event, "model_dump") else event for event in state.registered_events],
+        ensure_ascii=False
+    )
+    
+    prompt = PromptTemplate.from_template("""
+    The user wants to cancel or delete one or more calendar events.
+
+    Current registered schedules (JSON):
+    {registered_events}
+
+    User input:
+    "{user_input}"
+
+    Based on the list, extract all events the user clearly wants to delete.
+
+    Output format:
+    [
+        {{
+            "event_id": "제거할 event_id"
+        }}
+    ]
+
+    - Only include event_ids that can be confidently matched.
+    - If none match clearly, return an empty list.
+    - Do not include any explanation or additional text.
+    """)
+    
+    parser = PydanticOutputParser(pydantic_object=ScheduleModifyRequest)
+    chain = prompt | llm_for_parser | OutputFixingParser.from_llm(parser=parser, llm=llm_for_parser)
+    
+    try:
+        result = chain.invoke({
+            "user_input": state.user_input,
+            "registered_events": registered_json
+        })
+
+        # schedule_for_modify 에 삭제 대상만 저장
+        state.schedule_for_modify = [
+            CalendarEvent(event_id=eid, title="", description="", time={})
+            for eid in result.event_ids
+        ]
+        state.schedule_modify= "delete"
+    except Exception as e:
+        print("[delete_calendar] error", e)
     return state
 
 def export_plan_to_pdf(state: PlannerState) -> PlannerState:
@@ -422,6 +551,7 @@ def wants_export_pdf(state: PlannerState) -> bool:
     ]
     export_pattern = r"(pdf|출력|다운로드|저장|인쇄).*(일정|계획)|.*(일정|계획).*(pdf|출력|다운로드|저장|인쇄)"
     return has_string(state.user_input.lower(), export_trigger_phrases) or bool(re.search(export_pattern, state.user_input, re.IGNORECASE))
+
 def detect_share_intent():
     prompt= PromptTemplate.from_template(
     """
@@ -488,13 +618,31 @@ def check_kakao_login(state: PlannerState)->bool:
 def kakao_login(state: PlannerState)->bool:
     state.is_login_kakao= True
     return state
+def wants_update_schedule(state: PlannerState) -> bool:
+    return has_string(state.user_input, ["수정", "변경", "바꿔", "다르게"])
+def wants_delete_schedule(state: PlannerState) -> bool:
+    return has_string(state.user_input, ["삭제", "취소", "안할래", "쉴래", "지워"])
 
 def router(state: PlannerState) -> PlannerState:
+    if state.schedule_modify == "register":
+        return "RegisterCalendar"
+    elif state.schedule_modify == "update":
+        return "UpdateCalendar"
+    elif state.schedule_modify == "delete":
+        return "DeleteCalendar"
+    
+    if state.current_node == "share_kakao":
+        return "SuperviseInput"  # 또는 별도 ShareKakao 노드를 도입할 수도 있음
+    
     if wants_calendar_registration(state):
         if not state.kakao_token:
             return "KakaoLogin"
         else:
             return "RegisterCalendar"
+    if wants_update_schedule(state):
+        return "UpdateCalendar"
+    if wants_delete_schedule(state):
+        return "DeleteCalendar"
     if not has_minimum_required_info(state):
         return "SuperviseInput"
     if wants_export_pdf(state):
@@ -515,6 +663,8 @@ def build_flexible_planner_graph():
     builder.add_node("GeneratePlan", generate_plan)
     builder.add_node("FinalizePlan", finalize_plan)
     builder.add_node("RegisterCalendar", register_calendar)
+    builder.add_node("UpdateCalendar", update_calendar)
+    builder.add_node("DeleteCalendar", delete_calendar)
     builder.add_node("ExportPDF", export_plan_to_pdf)
     builder.add_node("KakaoLogin", kakao_login)
     
@@ -529,7 +679,10 @@ def build_flexible_planner_graph():
             "GeneratePlan": "GeneratePlan",
             "FinalizePlan": "FinalizePlan",
             "ExportPDF": "ExportPDF",
-            "KakaoLogin": "KakaoLogin"
+            "KakaoLogin": "KakaoLogin",
+            "RegisterCalendar": "RegisterCalendar",
+            "UpdateCalendar": "UpdateCalendar",
+            "DeleteCalendar": "DeleteCalendar"
         }
     )
     builder.add_conditional_edges(
@@ -543,6 +696,8 @@ def build_flexible_planner_graph():
     builder.add_edge("RecommendPlaces", END)
     builder.add_edge("GeneratePlan", END)
     builder.add_edge("RegisterCalendar", END)
+    builder.add_edge("UpdateCalendar", END)
+    builder.add_edge("DeleteCalendar", END)
     builder.add_edge("ExportPDF", END)
     builder.add_edge("KakaoLogin", END)
     

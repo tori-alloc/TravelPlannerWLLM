@@ -83,7 +83,7 @@ def get_schedule_list(access_token: str, start_date: str, end_date: str) -> Dict
         traceback.print_exc()
         raise CalendarServiceError("톡캘린더 리스트를 가져올 수 없습니다", e)
     
-def register_schedule(access_token: str, plan: list) -> Dict[str, Any]:
+def register_schedule(access_token: str, plan: list) -> List[Dict[str, Any]]:
     url= f"{KAKAO_BASE_URL}/calendar/create/event"
     headers= {
         "Authorization": f"Bearer {access_token}",
@@ -114,9 +114,6 @@ def register_schedule(access_token: str, plan: list) -> Dict[str, Any]:
 
     created_event= []
     for schedule in schedules:
-        print()
-        print(schedule)
-        print()
         try:
             event_json= json.dumps(schedule, ensure_ascii= False).replace("'", "\"")
             encoded_event= {
@@ -130,12 +127,20 @@ def register_schedule(access_token: str, plan: list) -> Dict[str, Any]:
             )
             res.raise_for_status()
             res_json= res.json()
-            created_event.append(res_json["event_id"])
+            # created_event.append(res_json["event_id"])
+            created_event.append(
+                {
+                    "event_id": res_json["event_id"],
+                    "title": schedule["title"],
+                    "time": schedule["time"],
+                    "description": schedule["description"]
+                }
+            )
         except Exception as e:
             traceback.print_exc()
             raise CalendarServiceError("일정 등록을 할 수 없습니다.", e)
     return created_event
-def update_schedule(access_token: str, event_id: str, event: Dict) -> Dict[str, Any]:
+def update_schedule(access_token: str, event: Dict) -> Dict[str, Any]:
     url= f"{KAKAO_BASE_URL}/calendar/update/event/host"
     headers= {
         "Authorization": f"Bearer {access_token}",
@@ -147,7 +152,7 @@ def update_schedule(access_token: str, event_id: str, event: Dict) -> Dict[str, 
             headers= headers,
             data= {
                 "calendar_id": "primary",
-                "event_id": event_id,
+                "event_id": event["event_id"],
                 "event": event
             }
         )

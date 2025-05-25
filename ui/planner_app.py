@@ -25,12 +25,12 @@ import pytz
 from utils.for_llm import get_llm
 from app.state import PlannerState, DayPlan, ScheduleItem, LocationItem, TransitItem
 from app.flow import build_flexible_planner_graph
+# from tools.kakao_tool import get_schedule_list, register_schedule, update_schedule, delete_schedule, get_friends_list, send_kakao_message
 from services.kakao import get_schedule_list, register_schedule, update_schedule, delete_schedule, get_friends_list, send_kakao_message
 from app.error import CalendarServiceError, SharingServiceError
 from app.session import get_session_id, get_temp_key
 
 load_dotenv()
-ENV= os.environ.get("ENV")
 GROQ_API_KEY= os.environ.get("GROQ_API_KEY")
 COHERE_API_KEY= os.environ.get("COHERE_API_KEY")
 KAKAO_API_KEY= os.environ.get("KAKAO_API_KEY")
@@ -90,19 +90,6 @@ def convert_dayplan_models_to_dict(result):
             day_dict[date] = schedule_dict
         converted.append(day_dict)
     return converted
-
-def dayplan_serialize(obj):
-    if isinstance(obj, list):
-        return [dayplan_serialize(o) for o in obj]
-    elif hasattr(obj, '__dict__'):
-        return {
-            k: dayplan_serialize(v) for k, v in vars(obj).items()
-        }
-    elif isinstance(obj, dict):
-        return {k: dayplan_serialize(v) for k, v in obj.items()}
-    else:
-        return obj
-        
 
 def parse_markdown_to_json(llm):
     llm_for_parser= get_llm(
@@ -187,20 +174,6 @@ def parse_markdown_to_json(llm):
     
     chain= prompt | llm | parser
     result= chain.invoke({ "plan" : st.session_state.planner_state.detail_plan })
-    print("parse markdown to json result", result)
-    # result_as_dict = [ 
-    #     { date: { 
-    #         time: [item.model_dump() if isinstance(item, BaseModel) else item for item in items] 
-    #         for time, items in day_info.items() 
-    #     }} 
-    #     for day in result 
-    #     for date, day_info in day.items() 
-    # ]
-    # st.session_state.planner_state.detail_plan_json= DayPlan(plan= result).model_dump()
-    # st.session_state.planner_state.detail_plan_json= { "plan": result_as_dict }
-    # converted_result= convert_dayplan_models_to_dict(result)
-    # converted_result= dayplan_serialize(result)
-    # st.session_state.planner_state.detail_plan_json= { "plan": converted_result }
     st.session_state.planner_state.detail_plan_json= result
 
 # def convert_detail_plan_json_to_text(plan_json: List[Dict[str, Dict[str, List[Dict]]]]) -> str:
@@ -315,71 +288,29 @@ def handle_schedule_registration(container):
     
     if existing_event_items:
         container.info("여행가려는 기간에 이미 등록되어있는 일정이 있습니다.")
+        print(existing_event_items)
         
         event_keys= [event['id'] for event in existing_event_items]
-        # select_all= container.checkbox("전체 선택", key="select_all")
         
         selected_to_delete= set()
-        # if select_all:
-        #     for key in event_keys:
-        #         if key not in st.session_state or not st.session_state[key]:
-        #             st.session_state[key]= True
-        # else:
-        #     for key in event_keys:
-        #         if key not in st.session_state or not st.session_state[key]:
-        #             st.session_state[key]= False
-        # for key in event_keys:
-        #     if key not in st.session_state or not st.session_state[key]:
-        #         st.session_state[key]= select_all
-            # if any(st.session_state.get(k, False) for k in event_keys):
-            #     if st.session_state.get("force_reset", False):
-            #         for key in event_keys:
-            #             st.session_state[key]= False
-            #         st.session_state["force_reset"]= False
-        # all_checked= True
         for event in existing_event_items:
-            # start_utc= datetime.fromisoformat(event["time"]["start_at"].replace("Z", "+00:00"))
-            # end_utc= datetime.fromisoformat(event["time"]["end_at"].replace("Z", "+00:00"))
-            # start_kst= start_utc.astimezone(KST)
-            # end_kst= end_utc.astimezone(KST)
             start_kst= get_converted_time_string(event["time"]["start_at"])
             end_kst= get_converted_time_string(event["time"]["end_at"])
             time_str = f"{start_kst.strftime('%Y-%m-%d %H:%M')} ~ {end_kst.strftime('%Y-%m-%d %H:%M')}"
             # label= f"{event['title']} ({event['time']['start_at']}-{event['time']['end_at']})"
             label= f"{event['title']} ({time_str})"
-            
-            # if select_all:
-            #     st.session_state[event["id"]]= True
-            # elif not select_all and all_selected:
-            #     st.session_state[event["id"]]= False
-            
+
             checked= container.checkbox(label, key=f"existing_event_{event['id']}")
             if checked:
-                # selected_to_delete.append(event["id"])
                 selected_to_delete.add(event["id"])
-                print("selected to delete", selected_to_delete)
             else:
-                # if event["id"] in selected_to_delete:
-                #     selected_to_delete.remove(event["id"])
                 selected_to_delete.discard(event["id"])
-                print("selected to delete false", selected_to_delete)
-                # all_checked= False
-                
-        # all_selected = all(st.session_state.get(f"existing_event_{event_id}", False) for event_id in event_keys)
-
-        # if all_selected and not select_all:
-        #     st.session_state.select_all= True
-        # elif not all_selected and select_all:
-        #     st.session_state.select_all= False
-        # if all_checked and not st.session_state.get("select_all", False):
-        #     st.session_state["select_all"]= True
-        # elif not all_checked and st.session_state.get("select_all", False):
-        #     st.session_state["select_all"]= False
         if container.button("전체 삭제 후 등록", key="remove_all_and_register"):
             try:
                 for event_id in event_keys:
                     delete_schedule(access_token, event_id)
                 reg_res = register_schedule(access_token, state.detail_plan_json.plan)
+                st.session_state.planner_state.registered_events= reg_res
                 container.success("등록되어있던 모든 일정을 삭제하고, 여행 일정을 새로 등록했습니다.")
                 return 
             except CalendarServiceError as e:
@@ -411,6 +342,7 @@ def handle_schedule_registration(container):
                     for event_id in selected_to_delete:
                         delete_schedule(access_token, event_id)
                     reg_res = register_schedule(access_token, state.detail_plan_json.plan)
+                    st.session_state.planner_state.registered_events= reg_res
                     container.success("선택하신 일정을 삭제하고 새 일정을 등록했습니다.")
                     state.is_registering_calendar= False
                     return 
@@ -419,6 +351,7 @@ def handle_schedule_registration(container):
         if container.button("등록된 일정 무시하고 일정 등록", key="continue_register"):
             try:
                 reg_res = register_schedule(access_token, state.detail_plan_json.plan)
+                st.session_state.planner_state.registered_events= reg_res
                 container.success("새 일정을 톡캘린더에 등록했습니다.")
                 state.is_registering_calendar= False
             except CalendarServiceError as e:
@@ -433,9 +366,72 @@ def handle_schedule_registration(container):
             except CalendarServiceError as e:
                 container.error(str(e))
 def handle_schedule_update(container):
-    pass
+    state= st.session_state.planner_state
+    access_token= st.session_state.kakao_token["access_token"]
+    
+    if not (state.schedule_modify and state.schedule_modify == "update"):
+        container.warning("수정할 일정이 없습니다.")
+        return 
+    
+    res= { "success": 0, "failure": 0 }
+    for item in state.schedule_for_modify:
+        if not item.event_id:
+            container.error(f"해당하는 이벤트의 event_id가 누락되었거나 존재하지 않습니다. 일정을 다시 확인하시고, 잠시 후 다시 시도해주세요: {item.title}")
+            res.failure += 1
+            continue
+        try:
+            update_schedule(
+                access_token= access_token,
+                event= item
+            )
+            res.success += 1
+        except CalendarServiceError as e:
+            container.error(str(e))
+            print(f"[Calendar Update] Error: {e}")
+            res.failure += 1
+    if res.success > 0:
+        container.success(f"{res.success}개의 일정을 수정했습니다.")
+    if res.failure > 0:
+        container.failure(f"{res.failure}개의 일정을 수정하는데 실패했습니다.")
+    state.schedule_modify= "none"
+    
 def handle_schedule_delete(container):
-    pass
+    state= st.session_state.planner_state
+    access_token= st.session_state.kakao_token["access_token"]
+    
+    if not (state.schedule_modify and state.schedule_modify == "delete"):
+        container.warning("삭제할 일정이 없습니다.")
+        return
+
+    delete_ids = [e.event_id for e in state.schedule_for_modify if e.event_id]
+    if not delete_ids:
+        container.warning("삭제할 일정의 ID를 찾을 수 없습니다.")
+        return
+
+    deleted = 0
+    for eid in delete_ids:
+        try:
+            delete_schedule(access_token, eid)
+            deleted += 1
+        except Exception as e:
+            print("[Delete Error]", e)
+
+    total = len(delete_ids)
+    if deleted == total:
+        container.success(f"{total}개의 일정이 모두 삭제되었습니다.")
+    elif deleted == 0:
+        container.error("일정을 삭제하지 못했습니다.")
+    else:
+        container.warning(f"{total}개 중 {deleted}개 일정만 삭제되었습니다.")
+
+    # 모든 일정 삭제 → 여행 취소
+    if deleted == len(state.registered_events):
+        container.info("여행을 취소하셨습니다. 새로운 일정을 세워보세요.")
+        state.detail_plan = None
+        state.detail_plan_json = None
+        state.registered_events.clear()
+
+    state.schedule_modify = "none"
 def share_schedule(container):
     if not "kakao_token" in st.session_state or not st.session_state.kakao_token:
         container.error("카카오 로그인을 먼저 진행해주세요.")
@@ -530,48 +526,90 @@ def run_chatbot_ui(temp_key: str):
                 st.markdown(f"🙋 사용자: {msg.content}")
             elif isinstance(msg, AIMessage):
                 st.markdown(f"🤖 AI: {msg.content}")
-            elif isinstance(msg, tuple) and msg[0] == "kakao":
-                if not st.session_state.get("kakao_token"):
-                    with server_state_lock[st.session_state.temp_key]:
-                        server_state[st.session_state.temp_key]["pre_login_state"] = st.session_state.planner_state
-                        server_state[st.session_state.temp_key]["chat_history"] = st.session_state.planner_state.chat_history
-                        server_state[st.session_state.temp_key]["pre_login_detail_plan"]= st.session_state.planner_state.detail_plan
-                        server_state[st.session_state.temp_key]["pre_login_detail_plan_json"]= st.session_state.planner_state.detail_plan_json
-                    st.warning("카카오 로그인을 위해 아래 버튼을 클릭해주세요.")
-                    if st.button("카카오 로그인", key="kakao_login_button"):
-                        st.markdown(f"""<meta http-equiv="refresh" content="0; url={build_kakao_auth_url()}" />""", unsafe_allow_html=True)
-                else:
-                    if st.button("일정 등록"):
-                        handle_schedule_registration(chat_history_container, "history")
-            elif isinstance(msg, tuple) and msg[0] == "kakao_share":
-                if not st.session_state.get("kakao_token"):
-                    with server_state_lock[st.session_state.temp_key]:
-                        server_state[st.session_state.temp_key]["pre_login_state"] = st.session_state.planner_state
-                        server_state[st.session_state.temp_key]["chat_history"] = st.session_state.planner_state.chat_history
-                        server_state[st.session_state.temp_key]["pre_login_detail_plan"]= st.session_state.planner_state.detail_plan
-                        server_state[st.session_state.temp_key]["pre_login_detail_plan_json"]= st.session_state.planner_state.detail_plan_json
-                    st.warning("카카오 로그인을 위해 아래 버튼을 클릭해주세요.")
-                    if st.button("카카오 로그인", key="kakao_login_button"):
-                        st.markdown(f"""<meta http-equiv="refresh" content="0; url={build_kakao_auth_url()}" />""", unsafe_allow_html=True)
-                else:
-                    unique_key = f"share_plan_{id(msg)}"
-                    if st.button("카카오톡으로 일정 공유", key=unique_key):
-                        share_schedule(chat_history_container)
-            elif isinstance(msg, tuple) and msg[0] == "download":
-                st.write(f"🙋 사용자: {user_prompt}")
-                with open(st.session_state.planner_state.generated_pdf_path, "rb") as f:
-                    pdf_bytes= f.read()
-                    st.download_button(
-                        label= "여행 일정을 PDF로 다운로드",
-                        data= pdf_bytes,
-                        file_name= "travel_plan.pdf",
-                        mime= "application/pdf",
-                        key="download_button_in_history"
-                    )
-    if st.session_state.planner_state.is_registering_calendar:
+            elif isinstance(msg, tuple):
+                if msg[0].startswith("kakao"):
+                    if not st.session_state.get("kakao_token"):
+                        with server_state_lock[st.session_state.temp_key]:
+                            server_state[st.session_state.temp_key]["pre_login_state"] = st.session_state.planner_state
+                            server_state[st.session_state.temp_key]["chat_history"] = st.session_state.planner_state.chat_history
+                            server_state[st.session_state.temp_key]["pre_login_detail_plan"]= st.session_state.planner_state.detail_plan
+                            server_state[st.session_state.temp_key]["pre_login_detail_plan_json"]= st.session_state.planner_state.detail_plan_json
+                        st.warning("카카오 로그인을 위해 아래 버튼을 클릭해주세요.")
+                        if st.button("카카오 로그인", key="kakao_login_button"):
+                            st.markdown(f"""<meta http-equiv="refresh" content="0; url={build_kakao_auth_url()}" />""", unsafe_allow_html=True)
+                    else:
+                        if "register" in msg[0]:
+                            if st.button("일정 등록"):
+                                handle_schedule_registration(chat_history_container, "history")
+                        elif "update" in msg[0]:
+                            handle_schedule_update(chat_history_container)
+                        elif "delete" in msg[0]:
+                            handle_schedule_delete(chat_history_container)
+                        else:
+                            unique_key = f"share_plan_{id(msg)}"
+                            if st.button("카카오톡으로 일정 공유", key=unique_key):
+                                share_schedule(chat_history_container)
+                elif msg[0] == "download":
+                    st.write(f"🙋 사용자: {user_prompt}")
+                    with open(st.session_state.planner_state.generated_pdf_path, "rb") as f:
+                        pdf_bytes= f.read()
+                        st.download_button(
+                            label= "여행 일정을 PDF로 다운로드",
+                            data= pdf_bytes,
+                            file_name= "travel_plan.pdf",
+                            mime= "application/pdf",
+                            key="download_button_in_history"
+                        )
+            # elif isinstance(msg, tuple) and msg[0] == "kakao":
+            #     if not st.session_state.get("kakao_token"):
+            #         with server_state_lock[st.session_state.temp_key]:
+            #             server_state[st.session_state.temp_key]["pre_login_state"] = st.session_state.planner_state
+            #             server_state[st.session_state.temp_key]["chat_history"] = st.session_state.planner_state.chat_history
+            #             server_state[st.session_state.temp_key]["pre_login_detail_plan"]= st.session_state.planner_state.detail_plan
+            #             server_state[st.session_state.temp_key]["pre_login_detail_plan_json"]= st.session_state.planner_state.detail_plan_json
+            #         st.warning("카카오 로그인을 위해 아래 버튼을 클릭해주세요.")
+            #         if st.button("카카오 로그인", key="kakao_login_button"):
+            #             st.markdown(f"""<meta http-equiv="refresh" content="0; url={build_kakao_auth_url()}" />""", unsafe_allow_html=True)
+            #     else:
+            #         if st.button("일정 등록"):
+            #             handle_schedule_registration(chat_history_container, "history")
+            # elif isinstance(msg, tuple) and msg[0] == "kakao_share":
+            #     if not st.session_state.get("kakao_token"):
+            #         with server_state_lock[st.session_state.temp_key]:
+            #             server_state[st.session_state.temp_key]["pre_login_state"] = st.session_state.planner_state
+            #             server_state[st.session_state.temp_key]["chat_history"] = st.session_state.planner_state.chat_history
+            #             server_state[st.session_state.temp_key]["pre_login_detail_plan"]= st.session_state.planner_state.detail_plan
+            #             server_state[st.session_state.temp_key]["pre_login_detail_plan_json"]= st.session_state.planner_state.detail_plan_json
+            #         st.warning("카카오 로그인을 위해 아래 버튼을 클릭해주세요.")
+            #         if st.button("카카오 로그인", key="kakao_login_button"):
+            #             st.markdown(f"""<meta http-equiv="refresh" content="0; url={build_kakao_auth_url()}" />""", unsafe_allow_html=True)
+            #     else:
+            #         unique_key = f"share_plan_{id(msg)}"
+            #         if st.button("카카오톡으로 일정 공유", key=unique_key):
+            #             share_schedule(chat_history_container)
+            # elif isinstance(msg, tuple) and msg[0] == "download":
+            #     st.write(f"🙋 사용자: {user_prompt}")
+            #     with open(st.session_state.planner_state.generated_pdf_path, "rb") as f:
+            #         pdf_bytes= f.read()
+            #         st.download_button(
+            #             label= "여행 일정을 PDF로 다운로드",
+            #             data= pdf_bytes,
+            #             file_name= "travel_plan.pdf",
+            #             mime= "application/pdf",
+            #             key="download_button_in_history"
+            #         )
+    if st.session_state.planner_state.schedule_modify != "none":
+        
+    # if st.session_state.planner_state.is_registering_calendar:
         with calendar_container:
             if "kakao_token" in st.session_state and st.session_state.kakao_token:
-                handle_schedule_registration(calendar_container)
+                schedule_modify= st.session_state.planner_state.schedule_modify
+                if schedule_modify == "register":
+                    handle_schedule_registration(calendar_container)
+                elif schedule_modify == "update":
+                    handle_schedule_update(calendar_container)
+                elif schedule_modify == "delete":
+                    handle_schedule_delete(calendar_container)
 
     st.subheader("대화창")
     with st.form("chat_form", clear_on_submit= True):
@@ -625,14 +663,15 @@ def run_chatbot_ui(temp_key: str):
                             parse_markdown_to_json(llm)
         
             
-        if state.current_node == "registration_request":
-            state.is_registering_calendar = True
-            print(" 1 ")
-            state.chat_history.append(("kakao", None))
-            print(" 2 ")
+        # if state.current_node == "registration_request":
+        if state.schedule_modify in ["register", "update", "delete"]:
+            # state.is_registering_calendar = True
+            # print(" 1 ")
+            state.chat_history.append((f"kakao_{state.schedule_modify}", None))
+            # print(" 2 ")
             with calendar_container:
                 print(" 3 ")
-                if not state.kakao_token:
+                if not state.kakao_token or not st.session_state.kakao_token:
                     print("4")
                     login_url= build_kakao_auth_url()
                     st.warning("카카오 로그인을 위해 아래 버튼을 클릭해주세요.")
@@ -648,8 +687,17 @@ def run_chatbot_ui(temp_key: str):
                         )
                 else:
                     print("5")
-                    if st.button("톡캘린더 등록하기"):
-                        handle_schedule_registration(calendar_container, "calendar")
+                    if state.schedule_modify == "register":
+                        if st.button("톡캘린더 등록하기"):
+                            handle_schedule_registration(calendar_container, "calendar")
+                    elif state.schedule_modify == "update":
+                        if st.button("톡캘린더 업데이트"):
+                            handle_schedule_update(calendar_container)
+                    elif state.schedule_modify == "delete":
+                        if st.button("톡캘린더 삭제하기"):
+                            handle_schedule_delete(calendar_container)
+                    # if st.button("톡캘린더 등록하기"):
+                    #     handle_schedule_registration(calendar_container, "calendar")
         if st.session_state.planner_state.generated_pdf_path:
             stream_container.write(f"🙋 사용자: {user_prompt}")
             with open(st.session_state.planner_state.generated_pdf_path, "rb") as f:
@@ -673,10 +721,9 @@ def run_chatbot_ui(temp_key: str):
     elif submitted and not user_prompt.strip():
         st.warning("공백이 아닌 내용을 입력해주세요.")
     
-    if ENV == "local" or ENV == "development":
-        st.write("Temp Key: ", st.session_state.temp_key)
-        st.write("현재 수집된 정보: ")
-        st.write(st.session_state.planner_state)
-        if "kakao_token" in st.session_state and st.session_state.kakao_token:
-            st.write("카카오 토큰")
-            st.write(st.session_state.kakao_token)
+    st.write("Temp Key: ", st.session_state.temp_key)
+    st.write("현재 수집된 정보: ")
+    st.write(st.session_state.planner_state)
+    if "kakao_token" in st.session_state and st.session_state.kakao_token:
+        st.write("카카오 토큰")
+        st.write(st.session_state.kakao_token)
